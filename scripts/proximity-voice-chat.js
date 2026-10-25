@@ -223,6 +223,26 @@ function _setup_sheet_tab(sheet_config, template_name, template_partials) {
   // all this is just because I couldn't think of a way to let Object.keys(...).sort() to sort it the way I wanted without affecting the rest of the order
 }
 
+
+/**
+ * Whether a user can hear everyone regardless of proximity. Defaults to on for GMs so they can narrate without
+ * having to remember to toggle anything, and off for everyone else.
+ * @param {foundry.documents.User} user
+ * @returns {boolean}
+ */
+export function is_global_listener(user) {
+  return user.getFlag(MODULE_ID, "global_listener") ?? user.isGM;
+}
+
+/**
+ * Whether a user is heard by everyone regardless of proximity. Defaults to on for GMs and off for everyone else.
+ * @param {foundry.documents.User} user
+ * @returns {boolean}
+ */
+export function is_global_speaker(user) {
+  return user.getFlag(MODULE_ID, "global_speaker") ?? user.isGM;
+}
+
 Hooks.on("init", async () => {
   _setup_sheet_tab(foundry.applications.sheets.TokenConfig, "token-proximity-tab.hbs", ["radius-type-input.hbs"]);
   _setup_sheet_tab(foundry.applications.sheets.PrototypeTokenConfig, "token-proximity-tab.hbs", ["radius-type-input.hbs"]);
@@ -234,10 +254,7 @@ Hooks.on("init", async () => {
     config: true,
     type: Number,
     default: 1200,// 12 tiles at 100px grid size / 60ft at 5ft tile size
-    onChange: () => {
-      _refresh_all_tokens();
-      _update_volumes();
-    }
+    onChange: () => _rebuild_all_sources()
   });
   await game.settings.register(MODULE_ID, "defaultProximityRadiusType", {
     name: "proximity-voice-chat.Settings.DefaultProximityRadiusType.Label",
@@ -246,25 +263,19 @@ Hooks.on("init", async () => {
     config: true,
     type: Number,
     default: RADIUS_TYPE.PIXELS,
-    onChange: () => {
-      _refresh_all_tokens();
-      _update_volumes();
-    },
+    onChange: () => _rebuild_all_sources(),
     choices: {
       [RADIUS_TYPE.PIXELS]: "proximity-voice-chat.RadiusType.Pixels",
       [RADIUS_TYPE.TILES]: "proximity-voice-chat.RadiusType.Tiles"
     }
-  })
-  await game.settings.register(MODULE_ID, "globalListen", {
-    name: "proximity-voice-chat.Settings.globalListen.Label",
-    hint: "proximity-voice-chat.Settings.globalListen.Hint",
+  });
+  await game.settings.register(MODULE_ID, "debug", {
+    name: "proximity-voice-chat.Settings.Debug.Label",
+    hint: "proximity-voice-chat.Settings.Debug.Hint",
     scope: "client",
     config: true,
     type: Boolean,
-    default: false,
-    onChange: () => {
-      _update_volumes();
-    }
+    default: false
   });
   // exposed api for macros
   game.modules.get(MODULE_ID).api = {
@@ -285,7 +296,10 @@ Hooks.on("init", async () => {
     set_scene_radius,
     set_scene_radius_type,
     is_scene_disabled,
-    set_scene_disabled
+    set_scene_disabled,
+    is_global_listener,
+    is_global_speaker,
+    diagnose
   }
 });
 
@@ -295,333 +309,276 @@ Hooks.on("init", async () => {
  */
 let _token_proximity_data = new Map();
 
-/**
- * Updates or creates a token's proximity data, arguments are optional if there's no change in the actual data but the PointSoundSource just needs to be reinitialized.
- * @param {foundry.documents.TokenDocument} token the token whose proximity data is being updated
- * @param {String} userlist the comma separated list of user UUIDs that speak through this token
- * @param {Partial<BaseEffectSourceData>} data data passed to PointSoundSource.initialize to recalculate the soundsource
- */
-function _update_proximity_data(token, userlist = "", data = {}) {
-  const default_radius = get_calculated_token_radius(token);
-  if (data.radius === null) data.radius = default_radius;
-  const comma_splitter = /\s*,\s*/;// splits on commas with any amount of whitespace on both sides
-  let proximity_data = _token_proximity_data.get(token.uuid);
-  if (proximity_data === undefined) {
-    // get can only be undefined if the proximity_data hasn't been created yet
-    if (typeof userlist !== "string" || userlist === "") return;
-    _token_proximity_data.set(token.uuid, {
-      soundsource: new foundry.canvas.sources.PointSoundSource({ object: token }),
-      userlist: userlist.split(comma_splitter)
-    });
-    proximity_data = _token_proximity_data.get(token.uuid);
+const _comma_splitter = /\s*,\s*/;// splits on commas with any amount of whitespace on both sides
 
-    const midpoint = token.getCenterPoint({ x: 0, y: 0, elevation: 0 });
-    // default initialize data while respecting any data passed
-    data = Object.assign({
-      x: token.x + (midpoint.x ?? 0),
-      y: token.y + (midpoint.y ?? 0),
-      elevation: token.elevation + (midpoint.elevation ?? 0),
-      radius: default_radius,
-      walls: true,
-      disabled: false
-    }, data);
-  } else if (typeof userlist === "string" && userlist !== "") {
-    // proximity data exists but userlist has to be updated
-    proximity_data.userlist = userlist.split(comma_splitter);
-  }
-  const default_radius_type = get_calculated_token_radius_type(token);
-  if (data.radius != null) data.radius *= token_radius_type_pixel_multiplier(token, default_radius_type);
-  proximity_data.soundsource.initialize(data);
+/**
+ * Whether a token has a non-empty userlist
+ * @param {foundry.documents.TokenDocument} token
+ * @returns {boolean}
+ */
+function _has_userlist(token) {
+  const userlist = token.getFlag(MODULE_ID, "userlist");
+  return typeof userlist === "string" && userlist.trim() !== "";
 }
 
-function _delete_proximity_data(token) {
-  _token_proximity_data.delete(token.uuid);
+/**
+ * Creates or replaces a token's proximity data from the token's current flags and (animated) position.
+ * Tokens without a userlist have their proximity data removed instead.
+ * @param {foundry.documents.TokenDocument} token the token whose proximity data is being rebuilt
+ */
+function _rebuild_source(token) {
+  if (!_has_userlist(token)) {
+    _token_proximity_data.delete(token.uuid);
+    return;
+  }
+  const soundsource = new foundry.canvas.sources.PointSoundSource({ object: null, sourceId: MODULE_ID + "." + token.uuid });
+  _token_proximity_data.set(token.uuid, {
+    soundsource,
+    userlist: token.getFlag(MODULE_ID, "userlist").split(_comma_splitter).filter(uuid => uuid !== "")
+  });
+  _move_source(token);
+}
+
+/**
+ * Moves a token's proximity source to the token's current (animated) position.
+ * During an animation the client TokenDocument holds the in-between position, so this follows the token visually.
+ * @param {foundry.documents.TokenDocument} token
+ */
+function _move_source(token) {
+  const proximity_data = _token_proximity_data.get(token.uuid);
+  if (!proximity_data) return;
+  const radius = get_calculated_token_radius(token) * token_radius_type_pixel_multiplier(token, get_calculated_token_radius_type(token));
+  const origin = token.getSoundOrigin(_position_override(token));
+  try {
+    proximity_data.soundsource.initialize({
+      x: origin.x,
+      y: origin.y,
+      elevation: origin.elevation,
+      // without an explicit level the source falls back to whichever level this client happens to be viewing
+      level: token.level ?? canvas.level?.id,
+      radius,
+      walls: true,
+      disabled: false
+    });
+  } catch (err) {
+    console.error(MODULE_ID + " | failed to initialize proximity source for " + token.uuid, err);
+    _token_proximity_data.delete(token.uuid);
+  }
+}
+
+/**
+ * Background tabs don't run canvas animations, so a token's prepared position stays wherever its animation stalled
+ * until the tab is visible again. While hidden, use the token's stored (destination) position instead.
+ * @param {foundry.documents.TokenDocument} token
+ * @returns {object} position data to pass to getSoundOrigin/getListenerPosition
+ */
+function _position_override(token) {
+  if (!globalThis.document.hidden) return {};
+  const { x, y, elevation } = token._source;
+  return { x, y, elevation };
+}
+
+function _rebuild_all_sources() {
+  _token_proximity_data.clear();
+  if (!canvas?.scene) return;
+  for (const token of canvas.scene.tokens) _rebuild_source(token);
+  _schedule_volume_update();
 }
 
 function _is_voice_active() {
-  const mode = game.settings.get("core", "rtcWorldSettings")?.mode;
-  return mode !== undefined && (mode === foundry.av.AVSettings.AV_MODES.AUDIO || mode === foundry.av.AVSettings.AV_MODES.AUDIO_VIDEO);
+  const mode = game.webrtc?.settings?.world?.mode;
+  return mode === foundry.av.AVSettings.AV_MODES.AUDIO || mode === foundry.av.AVSettings.AV_MODES.AUDIO_VIDEO;
 }
+
+/**
+ * The positions this client listens from: controlled tokens, or every owned token if none are controlled.
+ * @returns {Array<{x: number, y: number, elevation: number}>}
+ */
+function _get_listener_positions() {
+  let tokens = canvas.tokens.controlled;
+  if (tokens.length === 0) tokens = canvas.tokens.ownedTokens;
+  return tokens.map(token => token.document.getListenerPosition(_position_override(token.document)));
+}
+
+/**
+ * Calculates how loud another user should be for this client, in user/input space [0, 1].
+ * @param {foundry.documents.User} other_user
+ * @param {Array<{x: number, y: number, elevation: number}>} listeners
+ * @returns {{volume: number, reason: string}}
+ */
+function _calculate_user_volume(other_user, listeners) {
+  if (canvas.scene?.getFlag(MODULE_ID, "disabled")) return { volume: 1, reason: "scene proximity disabled" };
+  if (is_global_listener(game.user)) return { volume: 1, reason: "you are a global listener" };
+  if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
+  let volume = 0;
+  let speaking_tokens = 0;
+  for (const proximity_token of _token_proximity_data.values()) {
+    if (!proximity_token.userlist.includes(other_user.uuid)) continue;
+    speaking_tokens++;
+    for (const listener of listeners) {
+      volume = Math.max(volume, proximity_token.soundsource.getVolumeMultiplier(listener, { easing: true }));
+      if (volume >= 1) return { volume: 1, reason: "proximity" };
+    }
+  }
+  if (speaking_tokens === 0) return { volume: 0, reason: "they have no token in this scene" };
+  if (listeners.length === 0) return { volume: 0, reason: "you have no listening token" };
+  return { volume, reason: "proximity" };
+}
+
+/**
+ * Gets the element that plays a user's audio
+ * @param {string} user_id
+ * @returns {HTMLMediaElement | null}
+ */
+function _get_audio_element(user_id) {
+  let audio_element = ui.webrtc?.getUserVideoElement(user_id) ?? null;
+  if (game.modules.get("avclient-livekit")?.active) {
+    // avclient-livekit plays audio through its own element next to the video
+    audio_element = audio_element?.parentElement?.querySelector(".user-microphone-audio") ?? audio_element;
+  }
+  return audio_element;
+}
+
+/** @type {Map<string, number>} last volume multiplier applied per user, used to only log changes */
+const _last_volumes = new Map();
 
 function _update_volumes() {
-  if (!_canvas_ready) return;// idk why this happens, maybe loading onto a scene where other players are already causing volume updates?
-  if (!_is_voice_active()) return;// should be unnecessary (why would you run this module without voice?) but just in case
-  /**
-   * @type {Map<string, number>}
-   */
-  let user_volumes = new Map();
-  if (!canvas?.scene?.getFlag(MODULE_ID, "disabled") && !game.settings.get(MODULE_ID, "globalListen")) {
-    let proximity_tokens = Array.from(_token_proximity_data.values());
-    let controlled = canvas.tokens.controlled;
-    if (controlled.length === 0) {
-      controlled = canvas.tokens.ownedTokens;
+  if (!canvas?.ready || !_is_voice_active() || !ui.webrtc) return;
+  const listeners = _get_listener_positions();
+  const debug = game.settings.get(MODULE_ID, "debug");
+  for (const other_user of game.users) {
+    if (!other_user.active || other_user.isSelf) continue;
+    const { volume: multiplier, reason } = _calculate_user_volume(other_user, listeners);
+    if (debug && _last_volumes.get(other_user.id) !== multiplier) {
+      console.log(MODULE_ID + " | " + other_user.name + " -> " + multiplier.toFixed(2) + " (" + reason + ")");
     }
-    game.users.filter((user) => user.active && game.user.uuid !== user.uuid).forEach((other_active_user) => {
-      let volume = 0;
-      if (game.webrtc.settings.getUser(other_active_user.id)?.muted) {
-        volume = 0;
-      } else if (other_active_user.getFlag(MODULE_ID, "global_speaker")) {
-        volume = 1;
-      } else {
-        proximity_tokens.forEach((proximity_token) => {
-          if (volume >= 1) return;
-          if (!proximity_token.userlist.includes(other_active_user.uuid)) return;
-          controlled.forEach((controlled_token) => {
-            if (volume >= 1) return;
-            const midpoint = controlled_token.getCenterPoint({ x: 0, y: 0, elevation: 0 });
-            let listen_location = {
-              x: controlled_token.x + (midpoint.x ?? 0),
-              y: controlled_token.y + (midpoint.y ?? 0),
-              elevation: controlled_token.document.elevation + (midpoint.elevation ?? 0)
-            };
-            let token_volume = proximity_token.soundsource.getVolumeMultiplier(listen_location, { easing: true });
-            volume = Math.max(volume, token_volume);
-          });
-        });
-      }
-      user_volumes.set(other_active_user.id, volume);
-    });
-  } else {
-    game.users.filter((user) => user.active && game.user.uuid !== user.uuid).forEach((other_active_user) => {
-      user_volumes.set(other_active_user.id, 1);
-    });
+    _last_volumes.set(other_user.id, multiplier);
+
+    const audio_element = _get_audio_element(other_user.id);
+    if (!audio_element) continue;
+    // apply the multiplier in user/input space (0.8 = 80% as loud) rather than the logarithmic space element.volume uses
+    const slider_volume = game.webrtc.settings.getUser(other_user.id)?.volume ?? 1;
+    const volume = foundry.audio.AudioHelper.inputToVolume(foundry.audio.AudioHelper.volumeToInput(slider_volume) * multiplier);
+    if (Math.abs(audio_element.volume - volume) > 0.001) audio_element.volume = volume;
+    if (audio_element.paused && volume > 0) {
+      // Chrome can pause a media element whose volume goes from 0 back up, so resume it
+      audio_element.play()?.catch((err) => {
+        if (debug) console.warn(MODULE_ID + " | could not resume audio for " + other_user.name, err);
+      });
+    }
   }
-
-  user_volumes.forEach((volume, user_id) => {
-    // apply the volume multiplier in user/input space (0.8 = 80% as loud) rather than the strange decibel? logarithmic? or something idk space that video.volume uses
-    volume = foundry.audio.AudioHelper.inputToVolume(foundry.audio.AudioHelper.volumeToInput(game.webrtc.settings.get("client", "users." + user_id + ".volume") ?? 1) * volume);
-    let audio_source = ui.webrtc.getUserVideoElement(user_id);
-    if (game.modules.get("avclient-livekit")?.active) {
-      // should allow avclient-livekit to work, but might not account for every case of that module changing audio volume
-      // but that module doesn't seem to have an api of any kind so if it has issues: eh I tried
-      audio_source = audio_source?.parentElement?.querySelector(".user-microphone-audio") ?? audio_source;
-    }
-    if (!audio_source) return
-    audio_source.volume = volume;
-    if (audio_source.paused && volume > 0) {
-      // I cannot figure out why audio_source gets paused when _update_volumes runs with volume=0 but doesn't unpause upon the user unmuting/volume being > 0
-      // it doesn't seem to happen when manually setting volume to 0 in devtools while this module is disabled or when commenting out the 'audio_source.volume = volume'
-      // looking at the foundry source I also don't see any place where .pause() would get called on the webrtc video element
-      audio_source.play()?.catch(() => { });
-    }
-  });
 }
 
-function _refresh_all_tokens() {
-  canvas.scene.tokens.values().filter((token) => {
-    const userlist = token.getFlag(MODULE_ID, "userlist");
-    return userlist !== undefined && typeof userlist === "string" && userlist !== "";
-  }).forEach(token => {
-    let radius = token.getFlag(MODULE_ID, "radius");
-    if (radius === undefined) radius = null;
-    _update_proximity_data(token, undefined, { radius: radius });
-  });
+let _volume_update_scheduled = false;
+
+/**
+ * Coalesces bursts of volume updates into one, run after the current hook has resolved.
+ * Uses setTimeout rather than requestAnimationFrame because the latter never fires in background tabs.
+ */
+function _schedule_volume_update() {
+  if (_volume_update_scheduled) return;
+  _volume_update_scheduled = true;
+  setTimeout(() => {
+    _volume_update_scheduled = false;
+    _update_volumes();
+  }, 0);
 }
+
+// Foundry resets element volumes whenever it re-renders a camera or attaches a stream, and there's no hook for the
+// latter, so volumes are re-applied periodically as well as on events. Only changed volumes are written.
+setInterval(() => {
+  // token movement isn't animated in background tabs, so sources are moved to the tokens' destinations instead
+  if (globalThis.document.hidden && canvas?.ready) _rebuild_all_sources();
+  else _schedule_volume_update();
+}, 1000);
+
+globalThis.document.addEventListener("visibilitychange", () => {
+  if (canvas?.ready) _rebuild_all_sources();
+});
 
 Hooks.on("updateToken", (document, changed, _options, _userId) => {
-  const userlist = changed.flags?.[MODULE_ID]?.userlist;
-  const radius = changed.flags?.[MODULE_ID]?.radius;
-  const radius_type = changed.flags?.[MODULE_ID]?.radius_type;
-  if (userlist !== undefined || radius !== undefined || radius_type !== undefined) {
-    Hooks.callAll("updateTokenProximitySettings", document, userlist, radius);
+  const flags = changed.flags?.[MODULE_ID];
+  if (!flags) return;
+  if (["userlist", "radius", "radius_type", "-=userlist", "-=radius", "-=radius_type"].some(key => key in flags)) {
+    _rebuild_source(document);
+    Hooks.callAll("updateTokenProximitySettings", document, flags.userlist, flags.radius);
+    _schedule_volume_update();
   }
 });
 
-// don't fully remember why I made this its own hook, something to do with leaving the possibility for a macro or another module to listen for the setting change
-Hooks.on("updateTokenProximitySettings", async (token, userlist, radius) => {
-  let data = {};
-  if (radius !== undefined) data.radius = radius;
-  if (userlist === "" || userlist === null) {
-    _delete_proximity_data(token);
-  } else {
-    _update_proximity_data(token, userlist, data);
+Hooks.on("refreshToken", (token, flags) => {
+  // fires every frame while a token animates, with the document holding the in-between position
+  if (!flags.refreshPosition && !flags.refreshElevation) return;
+  if (_token_proximity_data.has(token.document.uuid)) {
+    _move_source(token.document);
+    _schedule_volume_update();
+  } else if (token.isOwner) {
+    _schedule_volume_update();
   }
-
-  _update_volumes();
 });
 
-Hooks.on("updateScene", (_document, changed, _options, _userId) => {
-  const radius = changed.flags?.[MODULE_ID]?.radius;
-  const disabled = changed.flags?.[MODULE_ID]?.disabled;
-  if (radius !== undefined) {
-    _refresh_all_tokens();
-    _update_volumes();
-  } else if (disabled !== undefined) {
-    _update_volumes();
-  }
+Hooks.on("createToken", (document, _options, _userId) => {
+  if (document.parent !== canvas.scene) return;
+  _rebuild_source(document);
+  _schedule_volume_update();
+});
+
+Hooks.on("deleteToken", (document, _options, _userId) => {
+  _token_proximity_data.delete(document.uuid);
+  _schedule_volume_update();
+});
+
+Hooks.on("controlToken", () => {
+  _schedule_volume_update();// because volume is based on controlled tokens or owned tokens, so any control change could change the volume
+});
+
+Hooks.on("updateScene", (document, changed, _options, _userId) => {
+  if (document !== canvas.scene) return;
+  const flags = changed.flags?.[MODULE_ID];
+  if (flags && ["radius", "radius_type", "-=radius", "-=radius_type"].some(key => key in flags)) _rebuild_all_sources();
+  else if (flags) _schedule_volume_update();
 });
 
 Hooks.on("updateUser", (_document, changed, _options, _userId) => {
-  if (changed.flags?.[MODULE_ID]?.global_speaker !== undefined) {
-    setTimeout(() => {
-      _update_volumes();
-    }, 100);
+  if (changed.flags?.[MODULE_ID] !== undefined) {
+    _schedule_volume_update();
+    if (game.user.isGM) _refresh_gm_buttons();
   }
+});
+
+Hooks.on("userConnected", () => {
+  _schedule_volume_update();
 });
 
 Hooks.on("canvasTearDown", (_canvas) => {
   _token_proximity_data.clear();
-
-  _canvas_ready = false;
 });
 
-let _canvas_ready = false;
-Hooks.on("canvasReady", (canvas) => {
-  _canvas_ready = true;
-  canvas.scene.tokens.values().filter((token) => {
-    const userlist = token.getFlag(MODULE_ID, "userlist");
-    return userlist !== undefined && typeof userlist === "string" && userlist !== "";
-  }).forEach(token => {
-    let radius = token.getFlag(MODULE_ID, "radius");
-    if (radius === undefined) radius = null;
-    _update_proximity_data(token, token.getFlag(MODULE_ID, "userlist"), { radius: radius });
-  });
-  // fix volume not updating between scene changes because of hook order stuff
-  setTimeout(() => {
-    _update_volumes();
-  }, 100);
+Hooks.on("canvasReady", (_canvas) => {
+  _rebuild_all_sources();
 });
 
-Hooks.on("createToken", (document, _options, _userId) => {
-  if (!document.getFlag(MODULE_ID, "userlist")) return;
-  let radius = document.getFlag(MODULE_ID, "radius");
-  if (radius === undefined) radius = null;
-  _update_proximity_data(document, document.getFlag(MODULE_ID, "userlist"), { radius: radius });
-
-  _update_volumes();
-});
-
-Hooks.on("deleteToken", (document, _options, _userId) => {
-  if (_token_proximity_data.has(document.uuid)) {
-    _delete_proximity_data(document);
-
-    _update_volumes();
-  } else if (document?.object?.isOwner) {
-    _update_volumes();
-  }
-});
-
-Hooks.on("moveToken", async (token, updateData, _options, _userId) => {
-  if (!_is_voice_active()) return;// should be unnecessary (why would you run this module without voice?) but this will prevent the animation function from unnecessarily running
-  if (!token.object) return;// strange movetoken behavior when token is teleported from another scene via a teleport token region
-  let should_update = false;
-  if (canvas.tokens.ownedTokens.map(token => token.id).includes(token.id)) {
-    should_update = true;
-  } else if (typeof token.getFlag(MODULE_ID, "userlist") === "string" && token.getFlag(MODULE_ID, "userlist") !== "") {
-    _update_proximity_data(token, { x: updateData.destination.x, y: updateData.destination.y, elevation: updateData.destination.elevation });
-    should_update = true;
-  }
-  if (should_update) {
-    const origin = updateData.origin;
-    const destination = updateData.destination;
-    const midpoint = token.getCenterPoint({ x: 0, y: 0, elevation: 0 });
-    let options = { action: token.movementAction };
-    const defaults = CONFIG.Token.movement.actions[options.action].getAnimationOptions(token);
-    for (const key in defaults) options[key] ??= defaults[key];
-    let duration = options.duration ?? token.object._getAnimationDuration(origin, destination, options);
-    if (duration > 0) {
-      let parent = {};
-      let attributes = [];
-      for (const attribute of ["x", "y", "elevation"]) {
-        if (origin[attribute] === undefined || destination[attribute] === undefined) continue;
-        parent[attribute] = origin[attribute] + (midpoint[attribute] ?? 0);
-        attributes.push({
-          from: origin[attribute] + (midpoint[attribute] ?? 0),
-          to: destination[attribute] + (midpoint[attribute] ?? 0),
-          attribute: attribute,
-          parent: parent
-        });
-      }
-      let data = {
-        context: token,
-        name: token.object.animationName + "Proximity",
-        duration: duration,
-        easing: options.easing,
-        priority: PIXI.UPDATE_PRIORITY.OBJECTS,
-        ontick: (_elapsedMS, _animation) => {
-          // desyncs from the token's visual position if during the animation the token is made to move again
-          // because the new animation fires immediately without waiting for the existing one to finish (unlike how the token actually moves visually)
-          // don't know how to fix and doesn't seem likely to come up much
-          _update_proximity_data(token, undefined, parent);
-          _update_volumes();
-        }
-      };
-      foundry.canvas.animation.CanvasAnimation.animate(attributes, data).then(() => {
-        _update_proximity_data(token, undefined, parent);
-        setTimeout(() => {
-          _update_volumes();
-        }, 100);
-      });
-    } else {
-      _update_proximity_data(token, undefined, {
-        x: destination.x + (midpoint.x ?? 0),
-        y: destination.y + (midpoint.y ?? 0),
-        elevation: destination.elevation + (midpoint.elevation ?? 0)
-      });
-      // token position within _update_volumes isn't updated until after this hook resolves
-      // which is only an issue for teleportation because it only updates volume once, inside this hook
-      setTimeout(() => {
-        _update_volumes();
-      }, 100);
-    }
-  }
-});
-
-Hooks.on("controlToken", () => {
-  _update_volumes();// because volume is based on controlled tokens or owned tokens, so any control change could change the volume
-});
-
-Hooks.on("updateWall", (_document, _changed, _options, _userId) => {
-  // recalculate pointsoundsource for all proximity tokens if any wall is updated since it can affect audio line of sight
-  Array.from(_token_proximity_data.values()).forEach((proximity_token) => {
-    proximity_token.soundsource.initialize();
-  });
-  _update_volumes();
-});
+let _wall_rebuild_timeout = null;
+function _on_wall_change() {
+  // walls and doors affect audio line of sight; rebuild after core has refreshed its edges
+  clearTimeout(_wall_rebuild_timeout);
+  _wall_rebuild_timeout = setTimeout(_rebuild_all_sources, 50);
+}
+Hooks.on("createWall", _on_wall_change);
+Hooks.on("updateWall", _on_wall_change);
+Hooks.on("deleteWall", _on_wall_change);
 
 Hooks.on("renderCameraViews", (_application, _element, _context, _options) => {
-  // add GM specific buttons
-  if (game.user.isGM) {
-    _add_gm_voice_buttons(document.querySelector(".user-controls[data-user=\"" + game.user.id + "\"]:not([hidden] .user-controls)"));
-  }
-
-  // re-rendering the cameraviews sidebar resets video.volume so it has to be updated again
-  _update_volumes();
-
-  // additional update but with a delay due to when someone first joins the voice chat the video element('s volume) gets updated slightly after
-  // this event resolves, not guaranteed to work due to differences in delay but unfortunately there's no proper hook for "player has joined VC"
-  setTimeout(() => {
-    _update_volumes();
-  }, 500);
+  if (game.user.isGM) _add_gm_voice_buttons();
+  // re-rendering the camera views resets video.volume so it has to be applied again
+  _schedule_volume_update();
 });
 
-Hooks.on("rtcSettingsChanged", (_settings, changed) => {
-  if (!changed?.client?.users) return;
-  if (Object.values(changed.client.users).some((user) => user.volume !== undefined)) {
-    _update_volumes();
-  }
+Hooks.on("rtcSettingsChanged", (_settings, _changed) => {
+  _schedule_volume_update();
 });
 
-Hooks.on("renderSettingsConfig", (_application, element, _context, _options) => {
-  if (game.user.isGM) return;
-  // remove the globalListen setting from appearing in the settings menu for non-GMs
-  element.querySelector('.form-group:has(#settings-config-' + MODULE_ID + '\\.globalListen)')?.remove();
-  // if the settings tab would then become empty remove it and the button that opens it
-  if (element.querySelector('.tab[data-tab="' + MODULE_ID + '"')?.childElementCount === 0) {
-    element.querySelector('.tabs button[data-tab="' + MODULE_ID + '"]')?.remove();
-    element.querySelector('.tab[data-tab="' + MODULE_ID + '"')?.remove();
-  }
-})
 
-
-
-function _update_button_class(button, active) {
-  if (active) {
-    button.classList.add("active");
-  } else {
-    button.classList.remove("active");
-  }
-}
 
 const _gm_global_listen = document.createElement("button");
 const _gm_global_speak = document.createElement("button");
@@ -631,33 +588,37 @@ Hooks.once("i18nInit", () => {
   _gm_global_speak.setAttribute("aria-label", game.i18n.localize("proximity-voice-chat.UI.globalSpeak.Hover"));
 });
 
+_gm_global_listen.type = "button";
 _gm_global_listen.classList.add(..."av-control inline-control toggle icon fa-solid fa-fw fa-podcast".split(" "));
 _gm_global_listen.setAttribute("data-tooltip", "");
-_gm_global_listen.onclick = async () => {
-  const current = game.settings.get(MODULE_ID, "globalListen");
-  await game.settings.set(MODULE_ID, "globalListen", !current);
-  _update_button_class(_gm_global_listen, !current);
-  _update_volumes();
+_gm_global_listen.onclick = async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  await game.user.setFlag(MODULE_ID, "global_listener", !is_global_listener(game.user));
 };
 
+_gm_global_speak.type = "button";
 _gm_global_speak.classList.add(..."av-control inline-control toggle icon fa-solid fa-fw fa-bullhorn".split(" "));
 _gm_global_speak.setAttribute("data-tooltip", "");
-_gm_global_speak.onclick = async () => {
-  const current = game.user.getFlag(MODULE_ID, "global_speaker");
-  await game.user.setFlag(MODULE_ID, "global_speaker", !current);
-  _update_button_class(_gm_global_speak, !current);
+_gm_global_speak.onclick = async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  await game.user.setFlag(MODULE_ID, "global_speaker", !is_global_speaker(game.user));
 };
 
-/**
- * adds GM proximity voice buttons to the given element, intended to add to the CameraViews sidebar
- * @param {HTMLElement} element the element to add the GM camera view buttons to
- */
-function _add_gm_voice_buttons(element) {
-  _update_button_class(_gm_global_listen, game.settings.get(MODULE_ID, "globalListen"));
-  _update_button_class(_gm_global_speak, game.user.getFlag(MODULE_ID, "global_speaker"));
+function _refresh_gm_buttons() {
+  _gm_global_listen.classList.toggle("active", is_global_listener(game.user));
+  _gm_global_speak.classList.toggle("active", is_global_speaker(game.user));
+}
 
-  element.appendChild(_gm_global_listen);
-  element.appendChild(_gm_global_speak);
+/**
+ * Adds the GM proximity voice buttons next to the GM's own camera controls
+ */
+function _add_gm_voice_buttons() {
+  _refresh_gm_buttons();
+  const element = document.querySelector(".user-controls[data-user=\"" + game.user.id + "\"]:not([hidden] .user-controls)");
+  if (!element) return;// the GM's own camera view isn't rendered, e.g. not connected to A/V yet
+  element.append(_gm_global_listen, _gm_global_speak);
 }
 
 
@@ -670,6 +631,7 @@ Hooks.on("renderTokenHUD", (application, element, _context, _options) => {
 const _gm_token_list_toggle = document.createElement("button");
 const _gm_token_list_toggle_icon = document.createElement("i");
 _gm_token_list_toggle.appendChild(_gm_token_list_toggle_icon);
+_gm_token_list_toggle.type = "button";
 _gm_token_list_toggle.classList.add("control-icon");
 _gm_token_list_toggle_icon.classList.add(..."fa-solid fa-podcast".split(" "));
 _gm_token_list_toggle.setAttribute("data-tooltip", "HUD.proximity-toggle-speaker.Hover");
@@ -678,16 +640,63 @@ _gm_token_list_toggle.onclick = async () => {
   if (!token_uuid) return;
   let token = await fromUuid(token_uuid);
   if (!token) return;
-  const userlist = _token_proximity_data.get(token.uuid)?.userlist ?? [];
-  if (userlist.includes(game.user.uuid)) {
+  if (is_user_in_userlist(token, game.user.uuid)) {
     await remove_user_from_userlist(token, game.user.uuid);
   } else {
     await add_user_to_userlist(token, game.user.uuid);
   }
+  _gm_token_list_toggle.classList.toggle("active", is_user_in_userlist(token, game.user.uuid));
 };
 
 function _add_token_list_toggle(element, token) {
   _gm_token_list_toggle.setAttribute("data-token-uuid", token.uuid);
-  _update_button_class(_gm_token_list_toggle, _token_proximity_data.get(token.uuid)?.userlist.includes(game.user.uuid));
-  element.querySelector(".col.left").appendChild(_gm_token_list_toggle);
+  _gm_token_list_toggle.classList.toggle("active", is_user_in_userlist(token, game.user.uuid));
+  element.querySelector(".col.left")?.appendChild(_gm_token_list_toggle);
+}
+
+
+
+/**
+ * Logs what this client thinks about every other active user's voice, for troubleshooting.
+ * Run in the browser console (F12) or a macro: game.modules.get("proximity-voice-chat").api.diagnose()
+ * @returns {Array<object>} one row per other active user
+ */
+export function diagnose() {
+  const listeners = canvas?.ready ? _get_listener_positions() : [];
+  const connected = game.webrtc?.client?.getConnectedUsers?.() ?? [];
+  console.log(MODULE_ID + " | diagnose", {
+    foundry: game.version,
+    module: game.modules.get(MODULE_ID).version,
+    canvasReady: !!canvas?.ready,
+    voiceActive: _is_voice_active(),
+    sceneDisabled: !!canvas?.scene?.getFlag(MODULE_ID, "disabled"),
+    youAreGlobalListener: is_global_listener(game.user),
+    youAreGlobalSpeaker: is_global_speaker(game.user),
+    listeningTokens: listeners.length,
+    proximityTokens: _token_proximity_data.size,
+    deafenedAll: !!game.webrtc?.settings?.client?.muteAll,
+    pageHadUserGesture: navigator.userActivation?.hasBeenActive
+  });
+  const rows = game.users.filter(user => user.active && !user.isSelf).map((user) => {
+    const element = _get_audio_element(user.id);
+    const stream = element?.srcObject;
+    const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
+    const settings = game.webrtc?.settings?.getUser(user.id);
+    const { volume, reason } = canvas?.ready ? _calculate_user_volume(user, listeners) : { volume: NaN, reason: "canvas not ready" };
+    return {
+      user: user.name,
+      inVoiceChat: connected.includes(user.id),
+      mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
+      proximity: Number(volume.toFixed(2)),
+      reason,
+      slider: Number(foundry.audio.AudioHelper.volumeToInput(settings?.volume ?? 1).toFixed(2)),
+      element: element ? element.tagName.toLowerCase() : "MISSING",
+      elementVolume: element ? Number(element.volume.toFixed(2)) : null,
+      paused: element?.paused ?? null,
+      elementMuted: element?.muted ?? null,
+      audioTracks: tracks.map(t => (t.enabled ? "on" : "off") + "/" + t.readyState + (t.muted ? "/no-data" : "")).join(", ") || "none"
+    };
+  });
+  console.table(rows);
+  return rows;
 }

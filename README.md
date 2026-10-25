@@ -5,6 +5,18 @@ You can watch [a showcase of the module's features](https://www.youtube.com/watc
 
 This module is designed so that a gamemaster only has to add players' UUIDs to the userlist of the relevant tokens. Then it'll automatically do volume calculations based the location of the user's controlled tokens to other users' proximity tokens using the same volume system as Foundry's placeable Ambient Sounds.
 
+## About this fork
+This is a locally patched copy of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) 1.1.0, checked against Foundry 14.365 and 14.369. It has no manifest URL, so Foundry won't "update" it back to upstream.
+
+Changes from upstream:
+* **GMs are narrators by default.** A GM hears everyone and is heard by everyone without touching anything. The two camera-dock buttons (podcast = Global Listening, bullhorn = Global Speaking) start lit; turn one off to drop into proximity, e.g. to speak only through an NPC token you've added yourself to with the token HUD button. Both are now per-user flags, so the old client-only "Global Listening" setting is gone.
+* Muted users are no longer forced to volume 0, which could leave their audio paused after they unmuted.
+* Token movement is tracked with Foundry v14's own animation (the `refreshToken` hook) instead of a duplicate animation that could drift out of sync.
+* Volumes are re-applied every second, and updates use timers that still fire in background tabs, so a player alt-tabbed to a character sheet still hears the party move around.
+* Sound sources get the token's scene Level (v14), instead of whatever level the viewing client happened to be on.
+* Opening or closing doors and creating or deleting walls now updates line of sight. Upstream's wall hook didn't rebuild anything.
+* Troubleshooting: a "Debug Logging" client setting, and `game.modules.get("proximity-voice-chat").api.diagnose()`, which prints a table of every other user's computed volume, the reason for it, and the state of their audio element.
+
 ## Features
 Automatic user volume adjustments depending on the distance between your controlled tokens and the other user's proximity tokens, respecting walls.
 
