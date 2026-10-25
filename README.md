@@ -6,7 +6,7 @@ You can watch [a showcase of the module's features](https://www.youtube.com/watc
 This module is designed so that a gamemaster only has to add players' UUIDs to the userlist of the relevant tokens. Then it'll automatically do volume calculations based the location of the user's controlled tokens to other users' proximity tokens using the same volume system as Foundry's placeable Ambient Sounds.
 
 ## About this fork
-This is a locally patched copy of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) 1.1.0, checked against Foundry 14.365 and 14.369. It has no manifest URL, so Foundry won't "update" it back to upstream.
+This is a locally patched copy of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) 1.1.0, checked against Foundry 14.365 and 14.369. Its manifest points at git.askew.us/lab/proximity-voice-chat, so Foundry updates come from this fork, not upstream.
 
 Changes from upstream:
 * **GMs are narrators by default.** A GM hears everyone and is heard by everyone without touching anything. The two camera-dock buttons (podcast = Global Listening, bullhorn = Global Speaking) start lit; turn one off to drop into proximity, e.g. to speak only through an NPC token you've added yourself to with the token HUD button. Both are now per-user flags, so the old client-only "Global Listening" setting is gone.
