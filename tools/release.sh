@@ -19,6 +19,7 @@ mv "$tmp" module.json
 
 node --check scripts/proximity-voice-chat.js
 node test/smoke.mjs | tail -1
+node test/peers.mjs | tail -1
 
 git add -A
 git commit -m "$version: $summary

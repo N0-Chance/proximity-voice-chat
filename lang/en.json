@@ -20,5 +20,7 @@
   "proximity-voice-chat.UI.globalListen.Hover": "Toggle Global Listening (hear everyone)",
   "proximity-voice-chat.UI.globalSpeak.Hover": "Toggle Global Speaking (everyone hears you)",
   "proximity-voice-chat.Settings.Debug.Label": "Debug Logging",
-  "proximity-voice-chat.Settings.Debug.Hint": "Logs every volume change, and why, to the browser console (F12)."
+  "proximity-voice-chat.Settings.Debug.Hint": "Logs every volume change, and why, to the browser console (F12).",
+  "proximity-voice-chat.Settings.FixPeerConnections.Label": "Fix Voice Connection Drops",
+  "proximity-voice-chat.Settings.FixPeerConnections.Hint": "Works around Foundry's built-in voice chat repeatedly replacing connections that take more than a few seconds to set up, which can leave people unable to hear each other. Everyone must reload after changing this."
 }

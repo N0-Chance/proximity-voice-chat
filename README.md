@@ -17,7 +17,8 @@ Changes from upstream:
 * Volumes are re-applied every second, and updates use timers that still fire in background tabs, so a player alt-tabbed to a character sheet still hears the party move around.
 * Sound sources get the token's scene Level (v14), instead of whatever level the viewing client happened to be on.
 * Opening or closing doors and creating or deleting walls now updates line of sight. Upstream's wall hook didn't rebuild anything.
-* Troubleshooting: a "Debug Logging" client setting, and `game.modules.get("proximity-voice-chat").api.diagnose()`, which prints a table of every other user's computed volume, the reason for it, and the state of their audio element.
+* **Works around Foundry's built-in voice chat dropping connections** ("Fix Voice Connection Drops" world setting, on by default). Every 8 seconds Foundry replaces any connection that isn't fully set up yet, on both ends at once, so slow connections never finish and logs fill with `Called in wrong state` and `order of m-lines ... doesn't match`. The fix lets only one side of each pair call, gives a connection 30 seconds to finish, and ignores events from replaced connections. `test/peers.mjs` simulates both behaviours.
+* Troubleshooting: a "Debug Logging" client setting, and `game.modules.get("proximity-voice-chat").api.diagnose()`, which prints a table of every other user's computed volume, the reason for it, whether the voice connection really finished, and the state of their audio element.
 
 ## Features
 Automatic user volume adjustments depending on the distance between your controlled tokens and the other user's proximity tokens, respecting walls.

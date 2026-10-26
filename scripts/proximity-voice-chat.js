@@ -277,6 +277,16 @@ Hooks.on("init", async () => {
     type: Boolean,
     default: false
   });
+  await game.settings.register(MODULE_ID, "fixPeerConnections", {
+    name: "proximity-voice-chat.Settings.FixPeerConnections.Label",
+    hint: "proximity-voice-chat.Settings.FixPeerConnections.Hint",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true,
+    requiresReload: true
+  });
+  _patch_simplepeer();
   // exposed api for macros
   game.modules.get(MODULE_ID).api = {
     RADIUS_TYPE,
@@ -580,6 +590,118 @@ Hooks.on("rtcSettingsChanged", (_settings, _changed) => {
 
 
 
+/** How long a connection that is still being set up is left alone before it is replaced */
+const _PEER_SETUP_TIMEOUT_MS = 30000;
+const _PEER_STARTED = Symbol("proximity-voice-chat.started");
+const _PEER_REMOTE_FINGERPRINT = Symbol("proximity-voice-chat.remoteFingerprint");
+
+/**
+ * Gets the DTLS certificate fingerprint from an SDP. Every new RTCPeerConnection has its own certificate,
+ * so a different fingerprint means the other side started a brand-new connection rather than renegotiating.
+ * @param {string | undefined} sdp
+ * @returns {string | null}
+ */
+function _sdp_fingerprint(sdp) {
+  return sdp?.match(/^a=fingerprint:(.+)$/m)?.[1]?.trim() ?? null;
+}
+
+/**
+ * Whether a SimplePeer connection is up. SimplePeer's own `connected` also waits for its data channel,
+ * which Foundry doesn't use, so media can flow long before it turns true.
+ * @param {object} peer a SimplePeer instance
+ * @returns {boolean}
+ */
+function _is_peer_up(peer) {
+  return peer.connected || peer._connecting || peer._pc?.connectionState === "connected";
+}
+
+/**
+ * Works around connection churn in Foundry's built-in (SimplePeer) A/V client.
+ *
+ * Every 8 seconds each client calls initializePeerStream for every other user, and that replaces any connection
+ * which isn't fully established yet with a new outgoing one, without closing the old one. Both sides do this,
+ * so slow connections never finish, offers cross ("Called in wrong state"), and offers from a replaced
+ * connection hit an established one ("order of m-lines ... doesn't match"). Each peer's event handlers also
+ * act on the user ID rather than the peer, so a leftover connection closing tears down its replacement.
+ */
+function _patch_simplepeer() {
+  const client_class = foundry.av?.clients?.SimplePeerAVClient;
+  if (!client_class) {
+    console.warn(MODULE_ID + " | SimplePeerAVClient not found, connection fixes not applied");
+    return;
+  }
+  if (!game.settings.get(MODULE_ID, "fixPeerConnections")) return;
+  const proto = client_class.prototype;
+  const original_initialize_peer_stream = proto.initializePeerStream;
+  const original_receive_signal = proto.receiveSignal;
+  const original_connect_peer = proto.connectPeer;
+
+  /**
+   * Removes a peer synchronously so the next lines see an empty slot (Foundry's disconnectPeer awaits first)
+   * @this {foundry.av.clients.SimplePeerAVClient}
+   */
+  function drop_peer(user_id) {
+    const peer = this.peers.get(user_id);
+    this.peers.delete(user_id);
+    const stream = this.remoteStreams.get(user_id);
+    this.remoteStreams.delete(user_id);
+    stream?.getTracks().forEach(track => track.stop());
+    peer?.destroy();
+    this.master.render();
+  }
+
+  proto.connectPeer = function (userId, isInitiator = false) {
+    const peer = original_connect_peer.call(this, userId, isInitiator);
+    peer[_PEER_STARTED] = Date.now();
+    // only let the peer that is currently registered for this user act on Foundry's behalf
+    for (const event of ["stream", "close", "error"]) {
+      const listeners = peer.listeners(event);
+      peer.removeAllListeners(event);
+      for (const listener of listeners) {
+        peer.on(event, (...args) => {
+          if (this.peers.get(userId) !== peer) return;
+          return listener(...args);
+        });
+      }
+    }
+    return peer;
+  };
+
+  proto.initializePeerStream = async function (userId) {
+    const peer = this.peers.get(userId);
+    if (peer && !peer.destroyed) {
+      if (_is_peer_up(peer)) return peer;
+      if (Date.now() - (peer[_PEER_STARTED] ?? 0) < _PEER_SETUP_TIMEOUT_MS) return peer;
+      if (game.settings.get(MODULE_ID, "debug")) console.log(MODULE_ID + " | replacing stalled connection with " + game.users.get(userId)?.name);
+    }
+    if (peer) drop_peer.call(this, userId);
+    // only one side of each pair makes the call, so the two ends never send offers at the same time
+    if (game.userId > userId) return null;
+    return original_initialize_peer_stream.call(this, userId);
+  };
+
+  proto.receiveSignal = function (userId, data) {
+    const fingerprint = data?.type === "offer" ? _sdp_fingerprint(data.sdp) : null;
+    const existing = this.peers.get(userId);
+    // answers and candidates only belong to a connection we still have; without one they're leftovers from a
+    // dropped connection, and Foundry would otherwise build a new answering connection around them
+    if (!existing && data?.type !== "offer") return;
+    if (existing && fingerprint && existing[_PEER_REMOTE_FINGERPRINT] && existing[_PEER_REMOTE_FINGERPRINT] !== fingerprint) {
+      // the other side has started over, e.g. after reloading; answer with a fresh connection
+      if (game.settings.get(MODULE_ID, "debug")) console.log(MODULE_ID + " | " + game.users.get(userId)?.name + " started a new connection");
+      drop_peer.call(this, userId);
+    } else if (existing && fingerprint && existing.initiator) {
+      // an offer while we are the caller means both sides called; whoever has the lower ID keeps calling
+      if (game.userId < userId) return;
+      drop_peer.call(this, userId);
+    }
+    const result = original_receive_signal.call(this, userId, data);
+    const peer = this.peers.get(userId);
+    if (peer && fingerprint) peer[_PEER_REMOTE_FINGERPRINT] ??= fingerprint;
+    return result;
+  };
+}
+
 const _gm_global_listen = document.createElement("button");
 const _gm_global_speak = document.createElement("button");
 
@@ -663,7 +785,6 @@ function _add_token_list_toggle(element, token) {
  */
 export function diagnose() {
   const listeners = globalThis.canvas?.ready ? _get_listener_positions() : [];
-  const connected = game.webrtc?.client?.getConnectedUsers?.() ?? [];
   console.log(MODULE_ID + " | diagnose", {
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
@@ -683,15 +804,21 @@ export function diagnose() {
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
     const { volume, reason } = globalThis.canvas?.ready ? _calculate_user_volume(user, listeners) : { volume: NaN, reason: "canvas not ready" };
-    const in_voice_chat = connected.includes(user.id);
+    // Foundry's getConnectedUsers() lists anyone with a connection object, even one that never finished,
+    // so ask the browser's own connection state instead
+    const peer = game.webrtc?.client?.peers?.get(user.id);
+    const peer_state = peer?._pc?.connectionState ?? null;
+    const connected = peer_state === "connected";
     let problem = "";
-    if (!in_voice_chat) problem = "NO VOICE CONNECTION to this user; look for 'ICE failed' errors, a TURN relay is likely needed";
+    if (!peer) problem = "NO VOICE CONNECTION to this user (not even an attempt)";
+    else if (!connected) problem = "voice connection not established (" + (peer_state ?? "unknown") + "); look for 'ICE failed' or SimplePeer errors";
     else if (!element) problem = "connected but no audio element";
     else if (element.paused) problem = "audio element paused";
     return {
       user: user.name,
-      inVoiceChat: in_voice_chat,
+      connected,
       problem: problem || "none",
+      connection: peer ? (peer._pc?.connectionState ?? "?") + "/" + (peer._pc?.iceConnectionState ?? "?") + (peer.initiator ? " (we called)" : " (they called)") : "none",
       mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
       proximity: Number(volume.toFixed(2)),
       reason,
