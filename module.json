@@ -1,7 +1,7 @@
 {
   "id": "proximity-voice-chat",
   "title": "Proximity Voice Chat",
-  "version": "1.1.1-askew.2",
+  "version": "1.1.1-askew.3",
   "compatibility": {
     "minimum": "14",
     "verified": "14.369"

@@ -380,7 +380,7 @@ function _position_override(token) {
 
 function _rebuild_all_sources() {
   _token_proximity_data.clear();
-  if (!canvas?.scene) return;
+  if (!globalThis.canvas?.scene) return;
   for (const token of canvas.scene.tokens) _rebuild_source(token);
   _schedule_volume_update();
 }
@@ -443,7 +443,7 @@ function _get_audio_element(user_id) {
 const _last_volumes = new Map();
 
 function _update_volumes() {
-  if (!canvas?.ready || !_is_voice_active() || !ui.webrtc) return;
+  if (!globalThis.canvas?.ready || !_is_voice_active() || !globalThis.ui?.webrtc) return;
   const listeners = _get_listener_positions();
   const debug = game.settings.get(MODULE_ID, "debug");
   for (const other_user of game.users) {
@@ -488,12 +488,12 @@ function _schedule_volume_update() {
 // latter, so volumes are re-applied periodically as well as on events. Only changed volumes are written.
 setInterval(() => {
   // token movement isn't animated in background tabs, so sources are moved to the tokens' destinations instead
-  if (globalThis.document.hidden && canvas?.ready) _rebuild_all_sources();
+  if (globalThis.document.hidden && globalThis.canvas?.ready) _rebuild_all_sources();
   else _schedule_volume_update();
 }, 1000);
 
 globalThis.document.addEventListener("visibilitychange", () => {
-  if (canvas?.ready) _rebuild_all_sources();
+  if (globalThis.canvas?.ready) _rebuild_all_sources();
 });
 
 Hooks.on("updateToken", (document, changed, _options, _userId) => {
@@ -662,14 +662,14 @@ function _add_token_list_toggle(element, token) {
  * @returns {Array<object>} one row per other active user
  */
 export function diagnose() {
-  const listeners = canvas?.ready ? _get_listener_positions() : [];
+  const listeners = globalThis.canvas?.ready ? _get_listener_positions() : [];
   const connected = game.webrtc?.client?.getConnectedUsers?.() ?? [];
   console.log(MODULE_ID + " | diagnose", {
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
-    canvasReady: !!canvas?.ready,
+    canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
-    sceneDisabled: !!canvas?.scene?.getFlag(MODULE_ID, "disabled"),
+    sceneDisabled: !!globalThis.canvas?.scene?.getFlag(MODULE_ID, "disabled"),
     youAreGlobalListener: is_global_listener(game.user),
     youAreGlobalSpeaker: is_global_speaker(game.user),
     listeningTokens: listeners.length,
@@ -682,10 +682,16 @@ export function diagnose() {
     const stream = element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
-    const { volume, reason } = canvas?.ready ? _calculate_user_volume(user, listeners) : { volume: NaN, reason: "canvas not ready" };
+    const { volume, reason } = globalThis.canvas?.ready ? _calculate_user_volume(user, listeners) : { volume: NaN, reason: "canvas not ready" };
+    const in_voice_chat = connected.includes(user.id);
+    let problem = "";
+    if (!in_voice_chat) problem = "NO VOICE CONNECTION to this user; look for 'ICE failed' errors, a TURN relay is likely needed";
+    else if (!element) problem = "connected but no audio element";
+    else if (element.paused) problem = "audio element paused";
     return {
       user: user.name,
-      inVoiceChat: connected.includes(user.id),
+      inVoiceChat: in_voice_chat,
+      problem: problem || "none",
       mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
       proximity: Number(volume.toFixed(2)),
       reason,

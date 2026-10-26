@@ -48,10 +48,15 @@ globalThis.canvas = { ready: true, scene, level: { id: "L1" }, tokens: { control
 globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ?? mkMedia(id) } };
 globalThis.fromUuid = async () => null;
 
-const realSetInterval = setInterval; globalThis.setInterval = () => 0; // keep node from hanging
+const intervals = []; globalThis.setInterval = (fn) => (intervals.push(fn), 0); // keep node from hanging
+// Foundry only creates the canvas global during setup, after module scripts have loaded and timers can fire
+const stubCanvas = globalThis.canvas; delete globalThis.canvas;
 await import(process.argv[2] ?? new URL("../scripts/proximity-voice-chat.js", import.meta.url).href);
-Hooks.callAll("init"); Hooks.callAll("i18nInit");
 const tick = () => new Promise(r => setTimeout(r, 5));
+try { intervals.forEach(fn => fn()); await tick(); console.log("ok   timer before canvas exists doesn't throw"); }
+catch (err) { console.log("FAIL timer before canvas exists: " + err); process.exit(1); }
+globalThis.canvas = stubCanvas;
+Hooks.callAll("init"); Hooks.callAll("i18nInit");
 const api = game.modules.get("proximity-voice-chat").api;
 let fails = 0;
 const expect = (label, got, want) => { const ok = Math.abs(got - want) < 0.01; if (!ok) fails++; console.log((ok ? "ok  " : "FAIL") + " " + label + ": " + got.toFixed(3) + " (want " + want + ")"); };
