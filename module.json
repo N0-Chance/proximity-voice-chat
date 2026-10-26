@@ -34,6 +34,6 @@
       "src": "styles/proximity-voice-chat.css"
     }
   ],
-  "description": "<p>A simplistic proximity chat using Foundry's built-in voice chat. Allowing you to assign which users can speak through specific tokens. Locally patched fork for Foundry v14 (GM narrator defaults, v14 movement/levels, diagnostics).</p>",
+  "description": "<p>Proximity voice chat using Foundry's built-in audio/video: voices fade with distance between tokens and are blocked by walls. Fork for Foundry v14 with GM narrator controls, speaking cues on tokens and in the players list, voice controls in place of the camera dock, and voice connection fixes.</p>",
   "url": "https://github.com/N0-Chance/proximity-voice-chat"
 }
