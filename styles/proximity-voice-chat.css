@@ -9,4 +9,82 @@
   button.av-control.active {
     --button-background-color: var(--button-hover-background-color);
   }
+
+  /* Hidden camera dock: moved off-screen rather than display:none, because voice audio plays through its video
+     elements and they must keep running */
+  body.pvc-hide-dock #camera-views,
+  body.pvc-hide-dock .camera-view.popout {
+    position: fixed !important;
+    left: -10000px !important;
+    top: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+
+  /* Speaking cue in the players list */
+  #players li.player.pvc-speaking {
+    border-radius: 4px;
+    box-shadow: inset 3px 0 0 var(--color-text-hyperlink, #ff6400);
+    background: rgb(255 255 255 / 0.08);
+  }
+
+  #players li.player .pvc-speaking-icon {
+    display: none;
+    margin-left: auto;
+    padding-left: 0.5em;
+  }
+
+  #players li.player.pvc-speaking .pvc-speaking-icon {
+    display: inline-block;
+    animation: pvc-pulse 0.9s ease-in-out infinite alternate;
+  }
+
+  #players li.player.pvc-speaking.pvc-inaudible {
+    box-shadow: inset 3px 0 0 rgb(255 255 255 / 0.25);
+    background: none;
+  }
+
+  #players li.player.pvc-speaking.pvc-inaudible .pvc-speaking-icon {
+    opacity: 0.35;
+    animation: none;
+  }
+
+  @keyframes pvc-pulse {
+    from { opacity: 0.45; }
+    to { opacity: 1; }
+  }
+
+  /* Voice controls along the bottom of the players list */
+  #players .pvc-voice-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 6px 2px;
+    margin-top: 2px;
+    border-top: 1px solid rgb(255 255 255 / 0.12);
+    pointer-events: all;
+  }
+
+  #players .pvc-voice-button {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 24px;
+    min-height: 0;
+    padding: 0;
+    line-height: 1;
+    font-size: var(--font-size-12, 12px);
+  }
+
+  #players .pvc-voice-button.active {
+    --button-background-color: var(--button-hover-background-color);
+    color: var(--color-text-emphatic, #fff);
+  }
+
+  #players .pvc-voice-button[data-pvc-action="mic"]:not(.active),
+  #players .pvc-voice-button[data-pvc-action="deafen"].active {
+    color: var(--color-level-error, #d33);
+  }
 }

@@ -14,6 +14,8 @@ git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "tag v$vers
 
 sed -i "s/^const SCRIPT_VERSION = \"[^\"]*\";/const SCRIPT_VERSION = \"$version\";/" scripts/proximity-voice-chat.js
 grep -q "^const SCRIPT_VERSION = \"$version\";" scripts/proximity-voice-chat.js || { echo "failed to set SCRIPT_VERSION" >&2; exit 1; }
+sed -i "s/^export const UI_SCRIPT_VERSION = \"[^\"]*\";/export const UI_SCRIPT_VERSION = \"$version\";/" scripts/voice-ui.js
+grep -q "^export const UI_SCRIPT_VERSION = \"$version\";" scripts/voice-ui.js || { echo "failed to set UI_SCRIPT_VERSION" >&2; exit 1; }
 
 tmp=$(mktemp)
 jq --arg v "$version" --arg d "$repo/releases/download/v$version/module.zip" \
@@ -23,6 +25,7 @@ mv "$tmp" module.json
 node --check scripts/proximity-voice-chat.js
 node test/smoke.mjs | tail -1
 node test/peers.mjs | tail -1
+node test/ui.mjs | tail -1
 
 git add -A
 git commit -m "$version: $summary

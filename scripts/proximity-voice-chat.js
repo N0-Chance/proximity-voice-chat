@@ -1,10 +1,12 @@
+import { register_voice_ui_settings, UI_SCRIPT_VERSION } from "./voice-ui.js";
+
 export const MODULE_ID = "proximity-voice-chat";
 
 /**
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.2.3";
+const SCRIPT_VERSION = "1.3.0";
 
 /**
  * The different types with which a radius can be measured
@@ -293,6 +295,7 @@ Hooks.on("init", async () => {
     requiresReload: true
   });
   _patch_simplepeer();
+  register_voice_ui_settings();
   // exposed api for macros
   game.modules.get(MODULE_ID).api = {
     RADIUS_TYPE,
@@ -315,6 +318,10 @@ Hooks.on("init", async () => {
     set_scene_disabled,
     is_global_listener,
     is_global_speaker,
+    toggle_global_listener,
+    toggle_global_speaker,
+    get_user_volume,
+    get_speaking_token_uuids,
     diagnose
   }
 });
@@ -439,6 +446,8 @@ function _get_listener_positions() {
  * @returns {{volume: number, reason: string}}
  */
 function _calculate_user_volume(other_user, listeners) {
+  // Foundry's own deafen doesn't work in 14.369 (its camera template reads "mutaAll"), so apply it here
+  if (game.webrtc?.settings?.client?.muteAll) return { volume: 0, reason: "you have deafened yourself" };
   if (canvas.scene?.getFlag(MODULE_ID, "disabled")) return { volume: 1, reason: "scene proximity disabled" };
   if (is_global_listener(game.user)) return { volume: 1, reason: "you are a global listener" };
   if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
@@ -612,8 +621,9 @@ Hooks.on("userConnected", (user) => {
 
 Hooks.once("ready", () => {
   const installed = game.modules.get(MODULE_ID).version;
-  if (installed === SCRIPT_VERSION) return;
-  const message = game.i18n.format("proximity-voice-chat.UI.StaleScript", { script: SCRIPT_VERSION, installed });
+  if (installed === SCRIPT_VERSION && UI_SCRIPT_VERSION === SCRIPT_VERSION) return;
+  const script = SCRIPT_VERSION === UI_SCRIPT_VERSION ? SCRIPT_VERSION : SCRIPT_VERSION + " / " + UI_SCRIPT_VERSION;
+  const message = game.i18n.format("proximity-voice-chat.UI.StaleScript", { script, installed });
   console.error(MODULE_ID + " | " + message);
   ui.notifications.error(message, { permanent: true });
 });
@@ -760,6 +770,46 @@ function _patch_simplepeer() {
   };
 }
 
+/**
+ * Toggles whether you hear everyone, and says what that means
+ * @returns {Promise<void>}
+ */
+export async function toggle_global_listener() {
+  const enabled = !is_global_listener(game.user);
+  await game.user.setFlag(MODULE_ID, "global_listener", enabled);
+  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalListen.On" : "proximity-voice-chat.UI.globalListen.Off", { localize: true });
+}
+
+/**
+ * Toggles whether everyone hears you, and says what that means
+ * @returns {Promise<void>}
+ */
+export async function toggle_global_speaker() {
+  const enabled = !is_global_speaker(game.user);
+  await game.user.setFlag(MODULE_ID, "global_speaker", enabled);
+  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalSpeak.On" : "proximity-voice-chat.UI.globalSpeak.Off", { localize: true });
+}
+
+/**
+ * How loud another user currently is for this client, as last applied, in user/input space [0, 1]
+ * @param {string} user_id
+ * @returns {number}
+ */
+export function get_user_volume(user_id) {
+  return _last_volumes.get(user_id) ?? 0;
+}
+
+/**
+ * The UUIDs of the tokens in the current scene that a user speaks through
+ * @param {foundry.documents.User} user
+ * @returns {Array<string>}
+ */
+export function get_speaking_token_uuids(user) {
+  const uuids = [];
+  for (const [uuid, data] of _token_proximity_data) if (data.userlist.includes(user.uuid)) uuids.push(uuid);
+  return uuids;
+}
+
 const _gm_global_listen = document.createElement("button");
 const _gm_global_speak = document.createElement("button");
 
@@ -774,9 +824,7 @@ _gm_global_listen.setAttribute("data-tooltip", "");
 _gm_global_listen.onclick = async (event) => {
   event.preventDefault();
   event.stopPropagation();
-  const enabled = !is_global_listener(game.user);
-  await game.user.setFlag(MODULE_ID, "global_listener", enabled);
-  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalListen.On" : "proximity-voice-chat.UI.globalListen.Off", { localize: true });
+  await toggle_global_listener();
 };
 
 _gm_global_speak.type = "button";
@@ -785,9 +833,7 @@ _gm_global_speak.setAttribute("data-tooltip", "");
 _gm_global_speak.onclick = async (event) => {
   event.preventDefault();
   event.stopPropagation();
-  const enabled = !is_global_speaker(game.user);
-  await game.user.setFlag(MODULE_ID, "global_speaker", enabled);
-  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalSpeak.On" : "proximity-voice-chat.UI.globalSpeak.Off", { localize: true });
+  await toggle_global_speaker();
 };
 
 function _refresh_gm_buttons() {
@@ -851,6 +897,7 @@ export function diagnose() {
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
     script: SCRIPT_VERSION,
+    uiScript: UI_SCRIPT_VERSION,
     canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
     sceneDisabled: !!globalThis.canvas?.scene?.getFlag(MODULE_ID, "disabled"),

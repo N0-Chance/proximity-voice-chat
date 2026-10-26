@@ -8,7 +8,8 @@ globalThis.Hooks = {
 };
 const el = () => ({ classList: { add() {}, toggle(c, v) { this[c] = v; } }, setAttribute() {}, getAttribute() {}, appendChild() {}, append(...k) { this.kids = k; } });
 const gmControls = el();
-globalThis.document = { hidden: false, createElement: el, addEventListener() {}, querySelector: () => gmControls };
+globalThis.document = { hidden: false, createElement: el, addEventListener() {}, querySelector: () => gmControls,
+  body: { classList: { toggle() {} } } };
 const sheet = () => ({ TABS: { sheet: { tabs: [] } }, PARTS: { a: {}, footer: {} } });
 const media = {};
 const mkMedia = (id) => (media[id] = { tagName: "VIDEO", volume: 1, paused: false, muted: false, srcObject: null, plays: 0, play() { this.plays++; this.paused = false; return Promise.resolve(); } });
@@ -19,7 +20,7 @@ class PointSoundSource {
 }
 globalThis.foundry = {
   applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() } },
-  canvas: { sources: { PointSoundSource } },
+  canvas: { sources: { PointSoundSource }, loadTexture: async () => ({}) },
   av: { AVSettings: { AV_MODES: { DISABLED: 0, AUDIO: 1, VIDEO: 2, AUDIO_VIDEO: 3 } } },
   audio: { AudioHelper: { volumeToInput: v => Math.sqrt(v), inputToVolume: v => v * v } },
 };
