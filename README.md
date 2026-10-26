@@ -6,7 +6,9 @@ You can watch [a showcase of the module's features](https://www.youtube.com/watc
 This module is designed so that a gamemaster only has to add players' UUIDs to the userlist of the relevant tokens. Then it'll automatically do volume calculations based the location of the user's controlled tokens to other users' proximity tokens using the same volume system as Foundry's placeable Ambient Sounds.
 
 ## About this fork
-This is a locally patched copy of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) 1.1.0, checked against Foundry 14.365 and 14.369. The code lives at git.askew.us/lab/proximity-voice-chat. It has no manifest URL (that Forgejo requires sign-in, which Foundry can't do), so install it by unzipping into Data/modules/; Foundry also won't "update" it back to upstream.
+This is a locally patched copy of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) 1.1.0, checked against Foundry 14.365 and 14.369. Install it in Foundry with this manifest URL: `https://github.com/N0-Chance/proximity-voice-chat/releases/latest/download/module.json`. Updates then arrive through Foundry's own update check, from this fork rather than upstream.
+
+To release: `tools/release.sh <version> "<what changed>"` bumps `module.json`, runs the smoke test, commits, tags, and pushes to Forgejo (`origin`) and GitHub (`github`). The tag triggers `.github/workflows/release.yml`, which publishes `module.json` and `module.zip` as a GitHub release.
 
 Changes from upstream:
 * **GMs are narrators by default.** A GM hears everyone and is heard by everyone without touching anything. The two camera-dock buttons (podcast = Global Listening, bullhorn = Global Speaking) start lit; turn one off to drop into proximity, e.g. to speak only through an NPC token you've added yourself to with the token HUD button. Both are now per-user flags, so the old client-only "Global Listening" setting is gone.

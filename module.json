@@ -2,6 +2,8 @@
   "id": "proximity-voice-chat",
   "title": "Proximity Voice Chat",
   "version": "1.1.1-askew.3",
+  "manifest": "https://github.com/N0-Chance/proximity-voice-chat/releases/latest/download/module.json",
+  "download": "https://github.com/N0-Chance/proximity-voice-chat/releases/download/v1.1.1-askew.3/module.zip",
   "compatibility": {
     "minimum": "14",
     "verified": "14.369"
@@ -33,5 +35,5 @@
     }
   ],
   "description": "<p>A simplistic proximity chat using Foundry's built-in voice chat. Allowing you to assign which users can speak through specific tokens. Locally patched fork for Foundry v14 (GM narrator defaults, v14 movement/levels, diagnostics).</p>",
-  "url": "https://git.askew.us/lab/proximity-voice-chat"
+  "url": "https://github.com/N0-Chance/proximity-voice-chat"
 }
