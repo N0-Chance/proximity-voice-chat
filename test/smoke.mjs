@@ -28,7 +28,7 @@ const mkUser = (id, name, isGM) => ({ id, name, isGM, uuid: "User." + id, active
   getFlag(m, k) { return this.flags[k]; }, async setFlag(m, k, v) { this.flags[k] = v; Hooks.callAll("updateUser", this, { flags: { [m]: { [k]: v } } }); } });
 const users = [mkUser("gm", "GM", true), mkUser("p1", "Alice", false), mkUser("p2", "Bob", false)];
 const mkToken = (id, x, y, userlist, owner) => {
-  const doc = { id, uuid: "Scene.s.Token." + id, x, y, elevation: 0, level: "L1", _source: { x, y, elevation: 0 }, parent: null, flags: { "proximity-voice-chat": { userlist } },
+  const doc = { id, name: "Token " + id, uuid: "Scene.s.Token." + id, x, y, elevation: 0, level: "L1", _source: { x, y, elevation: 0 }, parent: null, flags: { "proximity-voice-chat": { userlist } },
     getFlag(m, k) { return this.flags[m]?.[k]; }, getSoundOrigin(d = {}) { return { x: (d.x ?? this.x) + 50, y: (d.y ?? this.y) + 50, elevation: 0 }; },
     getListenerPosition(d = {}) { return this.getSoundOrigin(d); } };
   return { document: doc, owners: owner };
@@ -45,7 +45,9 @@ globalThis.game = {
   webrtc: { settings: { world: { mode: 3 }, client: {}, getUser: id => ({ volume: 0.64, muted: false, canBroadcastAudio: true }) }, client: { getConnectedUsers: () => users.map(u => u.id) } },
 };
 globalThis.canvas = { ready: true, scene, level: { id: "L1" }, tokens: { controlled: [] } };
-globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ?? mkMedia(id) } };
+const notices = [];
+globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ?? mkMedia(id) }, notifications: { info: (msg) => notices.push(msg) } };
+const click = async (button) => { await button.onclick({ preventDefault() {}, stopPropagation() {} }); await new Promise(r => setTimeout(r, 5)); };
 globalThis.fromUuid = async () => null;
 
 const intervals = []; globalThis.setInterval = (fn) => (intervals.push(fn), 0); // keep node from hanging
@@ -65,6 +67,7 @@ function becomeUser(id) {
   users.forEach(u => u.isSelf = u.id === id); game.user = game.users.get(id);
   canvas.tokens.ownedTokens = tokens.filter(t => game.user.isGM || t.owners === id).map(t => ({ document: t.document, isOwner: true }));
   canvas.tokens.controlled = [];
+  canvas.tokens.placeables = tokens.map(t => ({ document: t.document, isOwner: game.user.isGM || t.owners === id }));
   for (const k in media) delete media[k];
   Hooks.callAll("canvasReady", canvas);
 }
@@ -74,13 +77,26 @@ becomeUser("gm"); Hooks.callAll("renderCameraViews"); await tick();
 expect("GM hears Alice by default", media.p1.volume, 0.64);
 expect("GM hears Bob by default", media.p2.volume, 0.64);
 console.log("     GM buttons attached:", gmControls.kids?.length === 2, "listen active:", gmControls.kids?.[0].classList.active);
-// GM opts into proximity listening and selects a far-away monster
-await game.user.setFlag("proximity-voice-chat", "global_listener", false);
+// GM opts into proximity listening (by clicking the real button) and selects a far-away monster
+const [listenButton, speakButton] = gmControls.kids;
+await click(listenButton);
+console.log("     listen button now inactive:", listenButton.classList.active === false, "notice:", notices.at(-1));
 canvas.tokens.controlled = [{ document: tokens[2].document, isOwner: true }]; Hooks.callAll("controlToken"); await tick();
 expect("GM (proximity, far monster) hears Alice", media.p1.volume, 0);
 canvas.tokens.controlled = []; Hooks.callAll("controlToken"); await tick();
-expect("GM (proximity, nothing selected) hears Alice via her own token", media.p1.volume, 0.64);
-await game.user.setFlag("proximity-voice-chat", "global_listener", undefined);
+expect("GM (proximity, nothing selected, speaks through nothing) hears nobody", media.p1.volume, 0);
+// GM speaks through a token parked next to Alice, nothing selected: listens through that token
+const setUserlist = (t, list) => { t.document.flags["proximity-voice-chat"].userlist = list; Hooks.callAll("updateToken", t.document, { flags: { "proximity-voice-chat": { userlist: list } } }); };
+tokens[2].document.x = 0; tokens[2].document._source.x = 0;
+setUserlist(tokens[2], "User.gm"); await tick();
+expect("GM (proximity, nothing selected) hears Alice through the token they speak through", media.p1.volume, 0.64);
+expect("GM (proximity, nothing selected) hears Bob at 5 tiles through that token", media.p2.volume, 0.64 * ((Math.cos(Math.PI * 500 / 1200) + 1) / 2) ** 2);
+await click(listenButton);
+expect("GM hears Bob again after re-enabling global listening", media.p2.volume, 0.64);
+await click(speakButton);
+console.log("     speak flag after click:", users[0].flags.global_speaker, "notice:", notices.at(-1));
+await click(speakButton);
+setUserlist(tokens[2], "User.gm");
 
 // --- Alice's client
 becomeUser("p1"); await tick();
@@ -89,7 +105,9 @@ const bobAtDist500 = (Math.cos(Math.PI * 500 / 1200) + 1) / 2;
 expect("Alice hears Bob at 5 tiles", media.p2.volume, 0.64 * bobAtDist500 ** 2);
 // GM turns global speak off -> Alice's client gets updateUser
 users[0].flags.global_speaker = false; Hooks.callAll("updateUser", users[0], { flags: { "proximity-voice-chat": { global_speaker: false } } }); await tick();
-expect("Alice hears GM after GM disables global speak", media.gm.volume, 0);
+expect("Alice hears GM (global speak off) through the GM's token next to her", media.gm.volume, 0.64);
+setUserlist(tokens[2], ""); await tick();
+expect("Alice hears GM after GM disables global speak and has no token", media.gm.volume, 0);
 // Bob walks out of range (simulate animation frame)
 tokens[1].document.x = 3000; Hooks.callAll("refreshToken", { document: tokens[1].document, isOwner: false }, { refreshPosition: true }); await tick();
 expect("Alice hears Bob after he walks away", media.p2.volume, 0);

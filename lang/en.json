@@ -22,5 +22,9 @@
   "proximity-voice-chat.Settings.Debug.Label": "Debug Logging",
   "proximity-voice-chat.Settings.Debug.Hint": "Logs every volume change, and why, to the browser console (F12).",
   "proximity-voice-chat.Settings.FixPeerConnections.Label": "Fix Voice Connection Drops",
-  "proximity-voice-chat.Settings.FixPeerConnections.Hint": "Works around Foundry's built-in voice chat repeatedly replacing connections that take more than a few seconds to set up, which can leave people unable to hear each other. Everyone must reload after changing this."
+  "proximity-voice-chat.Settings.FixPeerConnections.Hint": "Works around Foundry's built-in voice chat repeatedly replacing connections that take more than a few seconds to set up, which can leave people unable to hear each other. Everyone must reload after changing this.",
+  "proximity-voice-chat.UI.globalListen.On": "Global Listening on: you hear everyone.",
+  "proximity-voice-chat.UI.globalListen.Off": "Global Listening off: you hear players near your selected tokens, or near tokens you speak through if none are selected.",
+  "proximity-voice-chat.UI.globalSpeak.On": "Global Speaking on: everyone hears you.",
+  "proximity-voice-chat.UI.globalSpeak.Off": "Global Speaking off: players hear you only near tokens you speak through (token HUD podcast button)."
 }

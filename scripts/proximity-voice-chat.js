@@ -344,6 +344,7 @@ function _rebuild_source(token) {
   const soundsource = new foundry.canvas.sources.PointSoundSource({ object: null, sourceId: MODULE_ID + "." + token.uuid });
   _token_proximity_data.set(token.uuid, {
     soundsource,
+    name: token.name,
     userlist: token.getFlag(MODULE_ID, "userlist").split(_comma_splitter).filter(uuid => uuid !== "")
   });
   _move_source(token);
@@ -401,13 +402,22 @@ function _is_voice_active() {
 }
 
 /**
- * The positions this client listens from: controlled tokens, or every owned token if none are controlled.
+ * The tokens this client listens through: the controlled tokens, or if none are controlled, every owned token
+ * for players. A GM owns every token, so with nothing selected a GM listens only through tokens they speak through.
+ * @returns {Array<foundry.canvas.placeables.Token>}
+ */
+function _get_listener_tokens() {
+  if (canvas.tokens.controlled.length > 0) return canvas.tokens.controlled;
+  if (game.user.isGM) return canvas.tokens.placeables.filter(token => is_user_in_userlist(token.document, game.user.uuid));
+  return canvas.tokens.ownedTokens;
+}
+
+/**
+ * The positions this client listens from, see _get_listener_tokens
  * @returns {Array<{x: number, y: number, elevation: number}>}
  */
 function _get_listener_positions() {
-  let tokens = canvas.tokens.controlled;
-  if (tokens.length === 0) tokens = canvas.tokens.ownedTokens;
-  return tokens.map(token => token.document.getListenerPosition(_position_override(token.document)));
+  return _get_listener_tokens().map(token => token.document.getListenerPosition(_position_override(token.document)));
 }
 
 /**
@@ -421,18 +431,24 @@ function _calculate_user_volume(other_user, listeners) {
   if (is_global_listener(game.user)) return { volume: 1, reason: "you are a global listener" };
   if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
   let volume = 0;
+  let loudest = null;
   let speaking_tokens = 0;
   for (const proximity_token of _token_proximity_data.values()) {
     if (!proximity_token.userlist.includes(other_user.uuid)) continue;
     speaking_tokens++;
     for (const listener of listeners) {
-      volume = Math.max(volume, proximity_token.soundsource.getVolumeMultiplier(listener, { easing: true }));
-      if (volume >= 1) return { volume: 1, reason: "proximity" };
+      const token_volume = proximity_token.soundsource.getVolumeMultiplier(listener, { easing: true });
+      if (token_volume <= volume) continue;
+      volume = token_volume;
+      loudest = proximity_token.name;
+      if (volume >= 1) break;
     }
+    if (volume >= 1) break;
   }
-  if (speaking_tokens === 0) return { volume: 0, reason: "they have no token in this scene" };
-  if (listeners.length === 0) return { volume: 0, reason: "you have no listening token" };
-  return { volume, reason: "proximity" };
+  if (speaking_tokens === 0) return { volume: 0, reason: "they speak through no token in this scene" };
+  if (listeners.length === 0) return { volume: 0, reason: game.user.isGM ? "no token selected" : "you have no listening token" };
+  if (volume === 0) return { volume: 0, reason: "out of range of their tokens" };
+  return { volume, reason: "proximity, through their token \"" + loudest + "\"" };
 }
 
 /**
@@ -716,7 +732,9 @@ _gm_global_listen.setAttribute("data-tooltip", "");
 _gm_global_listen.onclick = async (event) => {
   event.preventDefault();
   event.stopPropagation();
-  await game.user.setFlag(MODULE_ID, "global_listener", !is_global_listener(game.user));
+  const enabled = !is_global_listener(game.user);
+  await game.user.setFlag(MODULE_ID, "global_listener", enabled);
+  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalListen.On" : "proximity-voice-chat.UI.globalListen.Off", { localize: true });
 };
 
 _gm_global_speak.type = "button";
@@ -725,7 +743,9 @@ _gm_global_speak.setAttribute("data-tooltip", "");
 _gm_global_speak.onclick = async (event) => {
   event.preventDefault();
   event.stopPropagation();
-  await game.user.setFlag(MODULE_ID, "global_speaker", !is_global_speaker(game.user));
+  const enabled = !is_global_speaker(game.user);
+  await game.user.setFlag(MODULE_ID, "global_speaker", enabled);
+  ui.notifications.info(enabled ? "proximity-voice-chat.UI.globalSpeak.On" : "proximity-voice-chat.UI.globalSpeak.Off", { localize: true });
 };
 
 function _refresh_gm_buttons() {
@@ -793,7 +813,8 @@ export function diagnose() {
     sceneDisabled: !!globalThis.canvas?.scene?.getFlag(MODULE_ID, "disabled"),
     youAreGlobalListener: is_global_listener(game.user),
     youAreGlobalSpeaker: is_global_speaker(game.user),
-    listeningTokens: listeners.length,
+    listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name).join(", ") || "nothing" : "canvas not ready",
+    speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name).join(", ") || "nothing",
     proximityTokens: _token_proximity_data.size,
     deafenedAll: !!game.webrtc?.settings?.client?.muteAll,
     pageHadUserGesture: navigator.userActivation?.hasBeenActive
