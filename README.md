@@ -39,12 +39,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 ### Reliability fixes
 - **Voice connection drops:** Foundry's voice chat replaces any connection that takes more than about 8 seconds to set up, on both ends at once, so slow connections never finish. The module works around this. Symptoms in the console are `Called in wrong state` and `order of m-lines ... doesn't match`.
 - **Deafen:** Foundry 14.369's own deafen button does nothing (a typo in its camera template). The module applies deafen itself.
-- **Fixes from upstream:**
-  - Movement is tracked with Foundry v14's own token animation.
-  - Doors and walls update line of sight.
-  - Volumes keep updating in background tabs.
-  - Muted players no longer come back silent after unmuting.
-  - Sound sources use the token's scene Level.
+- **Fixes to upstream's proximity logic:** see [Differences from upstream](#differences-from-upstream).
 
 ## Settings
 | Setting | Scope | Default | What it does |
@@ -72,6 +67,58 @@ It prints one row per other user. Each row shows their current volume and why, a
 - **A red "old cached copy" error:** the browser is running a stale script. Clear the site's cached files and reload; in Chrome, open F12, right-click reload, and choose **Empty Cache and Hard Reload**.
 - **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a TURN relay in Foundry's audio/video settings: **Relay Server → Custom**.
 - **Firefox won't connect at all:** check `about:config`. `media.peerconnection.enabled` must be true, and `media.peerconnection.ice.no_host`, `.default_address_only`, `.relay_only`, and `.proxy_only` must be false.
+
+## Differences from upstream
+Compared with upstream 1.1.0, which was verified on Foundry 14.363.
+
+### GM behaviour
+- **The GM is heard and hears everyone by default.**
+  - Why: upstream only lets you be heard through tokens whose speaker list includes you. A GM is on none, so players heard nothing until the GM found the Global Speaking button.
+- **Global Listening with nothing selected now means listening only through tokens you speak through.**
+  - Why: upstream fell back to every token you own. A GM owns them all, including each player's own token, so turning Global Listening off changed nothing.
+- **A GM speaks through their selected tokens** when Global Speaking is off. The selection is shared with players through a user flag.
+  - Why: selecting a monster to voice it is what GMs naturally do. Upstream only allowed speaking through tokens whose speaker list includes you.
+- **Global Listening is a per-user flag, not a client setting.**
+  - Why: it follows the GM across browsers and devices, and it works the same way as Global Speaking.
+- **Toggling either one shows a short on-screen message saying what changed.**
+
+### Proximity and volume
+- **Movement is tracked through Foundry's `refreshToken` hook.**
+  - Why: v14 animates the token document itself. Upstream ran its own copy of each movement animation, which drifted out of sync when a token moved again mid-animation.
+- **Volumes keep updating in background tabs.**
+  - Why: upstream's movement tracking ran on the canvas animation loop, which browsers stop in hidden tabs. Players alt-tabbed to a character sheet stopped getting updates. Updates now use timers, and while a tab is hidden, sound positions use each token's real destination.
+- **Volumes are re-applied every second.**
+  - Why: Foundry resets each camera's volume whenever it redraws a camera tile or a stream connects, and there's no hook for the latter. Upstream re-applied after fixed 100–500 ms delays, which connections often outlast.
+- **Muted users are no longer forced to volume 0.**
+  - Why: Foundry already silences them. Setting the volume to 0 could leave Chrome's audio element paused after they unmuted.
+- **Walls and doors update line of sight** when created, changed, or deleted.
+  - Why: upstream's wall hook re-initialized each sound source with no data, which doesn't rebuild its shape.
+- **Sound sources carry the token's scene Level, and use Foundry's own `getSoundOrigin`/`getListenerPosition`.**
+  - Why: on v14 multi-level scenes, a source without a level takes whichever level the viewing client is on. The core methods replace upstream's hand-rolled centre-point maths.
+- **Smaller fixes:**
+  - The GM's camera-dock buttons no longer throw an error, which skipped that volume update, when the GM's own camera tile isn't rendered.
+  - The token HUD button is null-guarded.
+  - A movement call that passed a position as a speaker list is fixed.
+
+### Voice connections
+- **Workaround for Foundry's connection churn** ("Fix Voice Connection Drops").
+  - The problem: Foundry checks every 8 seconds and replaces any connection that hasn't fully finished setting up, on both ends at once, without closing the old one. A leftover connection that later fails then tears down its replacement.
+  - The module's fix: only one side of each pair calls, a connection gets 30 seconds to finish, events from replaced connections are ignored, and a fresh offer from a reloaded browser replaces the old connection immediately.
+- **Deafen works.**
+  - Why: Foundry 14.369's camera template reads `mutaAll` instead of `muteAll`, so its deafen button does nothing.
+
+### Interface
+- **The camera dock is hidden by default**, with speaking cues and a voice bar in the players list.
+  - Why: for audio-only proximity play, the dock takes space and shows nothing useful. It's moved off-screen rather than removed, because voice audio plays through its video elements.
+- **Speaking is detected from the audio you receive.**
+  - Why: Foundry's own "speaking" signal stays on permanently in always-on voice mode.
+- **New hotkeys, right-click volume and audio blocking, and `diagnose()`** with a Debug Logging setting.
+- **A stale-script check:** the scripts know their own version and show an error that stays on screen when a browser runs an old cached copy.
+
+### Packaging
+- **The manifest and downloads point at this fork**, so Foundry's update check never replaces it with upstream.
+- **Minimum Foundry version is 14** (upstream: 13), verified on 14.369. The fixes rely on v14 APIs: Levels, document-driven animation, and the v14 A/V client.
+- **Node test suites and a release script** (see [Development](#development)).
 
 ## API
 Available at `game.modules.get("proximity-voice-chat").api` for macros and other modules.
