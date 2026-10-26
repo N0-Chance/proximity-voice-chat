@@ -136,6 +136,7 @@ globalThis.foundry = {
 };
 globalThis.game = {
   userId: null,
+  keybindings: { register() {}, get: () => [] },
   users: { get: id => ({ name: id }) },
   modules: new Map([["proximity-voice-chat", {}]]),
   settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k] },

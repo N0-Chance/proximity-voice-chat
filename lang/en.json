@@ -41,9 +41,9 @@
   "proximity-voice-chat.Settings.SpeakingIndicator.Icon": "Icon in the centre",
   "proximity-voice-chat.Settings.SpeakingIndicator.Badge": "Badge on the corner",
   "proximity-voice-chat.Settings.SpeakingIndicator.None": "Off",
-  "proximity-voice-chat.UI.Mic": "Toggle your microphone",
-  "proximity-voice-chat.UI.Deafen": "Deafen (mute everyone for you)",
-  "proximity-voice-chat.UI.AVSettings": "Audio/video settings",
+  "proximity-voice-chat.UI.Mic": "Toggle microphone",
+  "proximity-voice-chat.UI.Deafen": "Toggle deafen (mute everyone for you)",
+  "proximity-voice-chat.UI.AVSettings": "Open audio/video settings",
   "proximity-voice-chat.UI.Volume": "Voice Volume",
   "proximity-voice-chat.UI.VolumeTitle": "Voice volume: {name}"
 }

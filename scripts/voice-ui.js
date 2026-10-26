@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "1.3.0";
+export const UI_SCRIPT_VERSION = "1.3.1";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -304,6 +304,47 @@ function _update_player_row(user_id) {
   row.classList.toggle("pvc-inaudible", speaking && !audible);
 }
 
+/**
+ * Voice bar actions that can also be bound to hotkeys (Configure Controls). Unbound by default.
+ * @type {Record<string, {keybinding: string, label: string, gm: boolean, run: () => Promise<unknown> | unknown}>}
+ */
+const VOICE_ACTIONS = {
+  mic: { keybinding: "toggleMic", label: "proximity-voice-chat.UI.Mic", gm: false, run: () => _toggle_mic() },
+  deafen: { keybinding: "toggleDeafen", label: "proximity-voice-chat.UI.Deafen", gm: false, run: () => _toggle_deafen() },
+  settings: { keybinding: "openAVSettings", label: "proximity-voice-chat.UI.AVSettings", gm: false, run: () => game.webrtc.config.render({ force: true }) },
+  listen: { keybinding: "toggleGlobalListen", label: "proximity-voice-chat.UI.globalListen.Hover", gm: true, run: () => api().toggle_global_listener() },
+  speak: { keybinding: "toggleGlobalSpeak", label: "proximity-voice-chat.UI.globalSpeak.Hover", gm: true, run: () => api().toggle_global_speaker() }
+};
+
+// registered synchronously in init, since Foundry refuses keybindings once its own keybinding setup has run
+Hooks.once("init", () => {
+  for (const action of Object.values(VOICE_ACTIONS)) {
+    game.keybindings.register(MODULE_ID, action.keybinding, {
+      name: action.label,
+      editable: [],
+      restricted: action.gm,
+      onDown: () => {
+        if (!_is_voice_active()) return false;
+        Promise.resolve(action.run()).then(() => _refresh_voice_bar());
+        return true;
+      }
+    });
+  }
+});
+
+/**
+ * A button's tooltip: what it does, plus its hotkeys if any are bound
+ * @param {string} action a key of VOICE_ACTIONS
+ * @returns {string}
+ */
+function _tooltip(action) {
+  const { keybinding, label } = VOICE_ACTIONS[action];
+  const text = game.i18n.localize(label);
+  const humanize = foundry.applications.sidebar?.apps?.ControlsConfig?.humanizeBinding;
+  const bindings = humanize ? (game.keybindings?.get(MODULE_ID, keybinding) ?? []).map(binding => humanize(binding)) : [];
+  return bindings.length ? text + " (" + bindings.join(", ") + ")" : text;
+}
+
 function _make_button(action, icon, label, onclick) {
   const button = document.createElement("button");
   button.type = "button";
@@ -313,7 +354,7 @@ function _make_button(action, icon, label, onclick) {
   glyph.className = icon;
   glyph.inert = true;
   button.append(glyph);
-  button.dataset.tooltip = label;
+  button.dataset.tooltip = _tooltip(action);
   button.setAttribute("aria-label", game.i18n.localize(label));
   button.addEventListener("click", async (event) => {
     event.preventDefault();
@@ -334,28 +375,32 @@ async function _toggle_deafen() {
   await game.webrtc.settings.set("client", "muteAll", !game.webrtc.settings.client.muteAll);
 }
 
+const VOICE_ICONS = {
+  mic: "fa-solid fa-microphone",
+  deafen: "fa-solid fa-headphones",
+  settings: "fa-solid fa-gear",
+  listen: "fa-solid fa-podcast",
+  speak: "fa-solid fa-bullhorn"
+};
+
 /**
- * Adds the voice control bar below the players list
+ * Adds the voice control bar as the last row of the active players box, so it reads as part of the list
  * @param {HTMLElement} element the players list application element
  */
 function _add_voice_bar(element) {
   element.querySelector(".pvc-voice-bar")?.remove();
   if (!_is_voice_active()) return;
-  const bar = document.createElement("div");
+  const active = element.querySelector("#players-active");
+  // the active players box is itself a list in v14, so the bar goes in as a list item there
+  const bar = document.createElement(["OL", "UL"].includes(active?.tagName) ? "li" : "div");
   bar.className = "pvc-voice-bar";
-  bar.append(
-    _make_button("mic", "fa-solid fa-microphone", "proximity-voice-chat.UI.Mic", _toggle_mic),
-    _make_button("deafen", "fa-solid fa-headphones", "proximity-voice-chat.UI.Deafen", _toggle_deafen),
-    _make_button("settings", "fa-solid fa-gear", "proximity-voice-chat.UI.AVSettings", () => game.webrtc.config.render({ force: true }))
-  );
-  if (game.user.isGM) {
-    bar.append(
-      _make_button("listen", "fa-solid fa-podcast", "proximity-voice-chat.UI.globalListen.Hover", () => api().toggle_global_listener()),
-      _make_button("speak", "fa-solid fa-bullhorn", "proximity-voice-chat.UI.globalSpeak.Hover", () => api().toggle_global_speaker())
-    );
+  for (const [action, { gm, label, run }] of Object.entries(VOICE_ACTIONS)) {
+    if (gm && !game.user.isGM) continue;
+    bar.append(_make_button(action, VOICE_ICONS[action], label, run));
   }
   const list = element.querySelector(".players-list");
-  if (list) list.after(bar);
+  if (active) active.append(bar);
+  else if (list) list.after(bar);
   else element.append(bar);
   _refresh_voice_bar();
 }
@@ -364,6 +409,7 @@ function _refresh_voice_bar() {
   const bar = ui.players?.element?.querySelector(".pvc-voice-bar");
   if (!bar || !game.webrtc?.settings) return;
   const me = game.webrtc.settings.getUser(game.user.id);
+  for (const button of bar.querySelectorAll(".pvc-voice-button")) button.dataset.tooltip = _tooltip(button.dataset.pvcAction);
   const set = (action, active, icon_on, icon_off) => {
     const button = bar.querySelector(`[data-pvc-action="${action}"]`);
     if (!button) return;
@@ -409,6 +455,7 @@ Hooks.once("ready", async () => {
     _reconcile_speakers();
     _refresh_token_indicators();
     for (const user_id of _speakers.keys()) _update_player_row(user_id);
+    _refresh_voice_bar();// picks up hotkeys rebound in Configure Controls
   }, 1000);
 });
 

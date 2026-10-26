@@ -42,6 +42,7 @@ globalThis.game = {
   modules: new Map([["proximity-voice-chat", { version: "test", active: true }]]),
   settings: { register: (m, k, c) => settings[k] = c.default, get: (m, k) => settings[k] },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
+  keybindings: { register() {}, get: () => [] },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: { world: { mode: 3 }, client: {}, getUser: id => ({ volume: 0.64, muted: false, canBroadcastAudio: true }) }, client: { getConnectedUsers: () => users.map(u => u.id) } },
 };

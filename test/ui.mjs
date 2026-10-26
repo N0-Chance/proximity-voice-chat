@@ -29,9 +29,11 @@ class El {
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
   async dispatch(type, event = {}) { for (const fn of this.listeners[type] ?? []) await fn({ preventDefault() {}, stopPropagation() {}, target: this, ...event }); }
   _matches(sel) {
-    const m = sel.match(/^([a-z]+)?((?:\.[\w-]+)*)((?:\[[\w-]+="[^"]*"\])*)$/i);
+    const m = sel.match(/^([a-z]+)?(#[\w-]+)?((?:\.[\w-]+)*)((?:\[[\w-]+="[^"]*"\])*)$/i);
     if (!m) throw new Error("unsupported selector " + sel);
     if (m[1] && this.tagName !== m[1].toUpperCase()) return false;
+    if (m[2] && this.attrs.id !== m[2].slice(1)) return false;
+    m.splice(2, 1);
     for (const c of (m[2].match(/\.[\w-]+/g) ?? [])) if (!this.classList.contains(c.slice(1))) return false;
     for (const a of (m[3].match(/\[[\w-]+="[^"]*"\]/g) ?? [])) {
       const [, key, value] = a.match(/\[([\w-]+)="([^"]*)"\]/);
@@ -81,8 +83,10 @@ class DialogV2 {
   constructor(o) { this.options = o; dialogs.push(this); }
   async render() { this.element = new El("div"); const input = new El("input"); input.className = "pvc-volume"; this.element.append(input); return this; }
 }
+const humanizeBinding = b => [...(b.modifiers ?? []), b.key].join(" + ");
 globalThis.foundry = {
-  applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() }, api: { DialogV2 } },
+  applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() }, api: { DialogV2 },
+    sidebar: { apps: { ControlsConfig: { humanizeBinding } } } },
   canvas: { sources: { PointSoundSource }, loadTexture: async () => ({ fake: "texture" }) },
   av: { AVSettings: { AV_MODES: { DISABLED: 0, AUDIO: 1, VIDEO: 2, AUDIO_VIDEO: 3 } } },
   audio: { AudioHelper: { volumeToInput: v => Math.sqrt(v), inputToVolume: v => v * v } },
@@ -117,6 +121,8 @@ const rtc = {
   }
 };
 let configOpened = 0;
+const keybindings = new Map();
+const bound = {};
 globalThis.game = {
   version: "14.369",
   modules: new Map([["proximity-voice-chat", { version: "1.2.3", active: true }]]),
@@ -125,6 +131,10 @@ globalThis.game = {
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: rtc, broadcasting: true, config: { render: () => configOpened++ },
     client: { getMediaStreamForUser: id => streams[id] ?? null, getLevelsStreamForUser: id => streams[id] ?? null } },
+  keybindings: {
+    register: (ns, action, data) => keybindings.set(action, data),
+    get: (ns, action) => bound[action] ?? []
+  },
   audio: {
     startLevelReports: (id, stream, cb) => { if (!levelReportsWork) return false; levelReports.set(id, { stream, cb }); return true; },
     stopLevelReports: id => levelReports.delete(id)
@@ -145,13 +155,14 @@ const check = (label, ok, detail = "") => { if (!ok) fails++; console.log((ok ? 
 const tick = () => new Promise(r => setTimeout(r, 5));
 const runIntervals = async () => { intervals.forEach(fn => fn()); await tick(); };
 
-/** builds a fake players list like templates/ui/players.hbs and renders it through the hook */
+/** builds a fake players list shaped like v14's templates/ui/players.hbs and renders it through the hook */
 function renderPlayers() {
   const element = new El("aside");
   element.attrs.id = "players";
-  const list = new El("ol"); list.className = "players-list";
-  for (const u of users) { const li = new El("li"); li.className = "player"; li.dataset.userId = u.id; list.append(li); }
-  element.append(list);
+  const inactive = new El("ol"); inactive.className = "players-list"; inactive.attrs.id = "players-inactive";
+  const active = new El("ol"); active.className = "players-list"; active.attrs.id = "players-active";
+  for (const u of users) { const li = new El("li"); li.className = "player"; li.dataset.userId = u.id; active.append(li); }
+  element.append(inactive, active);
   ui.players = { element };
   Hooks.callAll("renderPlayers", ui.players, element, {}, {});
   return element;
@@ -234,8 +245,9 @@ levelReportsWork = true; streams.p2 = { id: "s2c", getAudioTracks: () => [{}] };
 
 // --- voice bar (player)
 const bar = ui.players.element.querySelector(".pvc-voice-bar");
-const list = ui.players.element.querySelector(".players-list");
-check("voice bar sits right after the players list", !!bar && ui.players.element.children.indexOf(bar) === ui.players.element.children.indexOf(list) + 1);
+const activeBox = ui.players.element.querySelector("#players-active");
+check("voice bar is the last row of the active players box, not the inactive one", !!bar && activeBox.children.at(-1) === bar && !ui.players.element.querySelector("#players-inactive").children.includes(bar));
+check("voice bar is a list item inside that list", bar.tagName === "LI");
 const actions = bar.children.map(b => b.dataset.pvcAction).join(",");
 check("player bar has mic, deafen, settings only", actions === "mic,deafen,settings", actions);
 const button = a => bar.querySelector(`button[data-pvc-action="${a}"]`);
@@ -251,6 +263,22 @@ await button("deafen").dispatch("click"); await runIntervals();
 check("undeafen restores volumes", media.gm?.volume === 1, String(media.gm?.volume));
 await button("settings").dispatch("click");
 check("settings button opens Foundry's A/V config", configOpened === 1);
+
+// --- hotkeys
+check("five hotkeys registered, unbound by default", keybindings.size === 5 && [...keybindings.values()].every(k => k.editable.length === 0), [...keybindings.keys()].join(","));
+check("Global Listen/Speak hotkeys are GM-only", keybindings.get("toggleGlobalListen").restricted && keybindings.get("toggleGlobalSpeak").restricted && !keybindings.get("toggleMic").restricted);
+check("tooltip without a binding is just the label", button("mic").dataset.tooltip === "proximity-voice-chat.UI.Mic", button("mic").dataset.tooltip);
+bound.toggleMic = [{ key: "KeyM", modifiers: ["Control"] }];
+await runIntervals();
+check("tooltip shows the bound hotkey once it's set", button("mic").dataset.tooltip === "proximity-voice-chat.UI.Mic (Control + KeyM)", button("mic").dataset.tooltip);
+check("hotkey handler reports it handled the key", keybindings.get("toggleMic").onDown() === true);
+await tick();
+check("mic hotkey mutes you and updates the button", rtc.client.users.p1?.muted === true && !button("mic").classList.contains("active"));
+keybindings.get("toggleMic").onDown(); await tick();
+check("pressing it again unmutes", rtc.client.users.p1?.muted === false);
+keybindings.get("toggleDeafen").onDown(); await tick();
+check("deafen hotkey toggles deafen", rtc.client.muteAll === true);
+keybindings.get("toggleDeafen").onDown(); await tick();
 
 // --- right-click menu
 const options = []; Hooks.callAll("getUserContextOptions", ui.players, options);

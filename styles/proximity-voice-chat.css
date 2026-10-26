@@ -27,7 +27,6 @@
   /* Speaking cue in the players list */
   #players li.player.pvc-speaking {
     border-radius: 4px;
-    box-shadow: inset 3px 0 0 var(--color-text-hyperlink, #ff6400);
     background: rgb(255 255 255 / 0.08);
   }
 
@@ -43,7 +42,6 @@
   }
 
   #players li.player.pvc-speaking.pvc-inaudible {
-    box-shadow: inset 3px 0 0 rgb(255 255 255 / 0.25);
     background: none;
   }
 
@@ -60,18 +58,20 @@
   /* Voice controls along the bottom of the players list */
   #players .pvc-voice-bar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    align-items: center;
     gap: 4px;
-    padding: 4px 6px 2px;
-    margin-top: 2px;
+    margin: 2px 0 0;
+    padding: 6px 0 0;
     border-top: 1px solid rgb(255 255 255 / 0.12);
+    list-style: none;
     pointer-events: all;
   }
 
   #players .pvc-voice-button {
-    flex: 0 0 auto;
-    width: 28px;
-    height: 24px;
+    flex: 0 0 26px;
+    width: 26px;
+    height: 22px;
     min-height: 0;
     padding: 0;
     line-height: 1;
