@@ -1,6 +1,12 @@
 export const MODULE_ID = "proximity-voice-chat";
 
 /**
+ * The version this script was released as, kept in step with module.json by tools/release.sh.
+ * Compared against the installed module's version to catch browsers running a stale cached copy.
+ */
+const SCRIPT_VERSION = "1.2.3";
+
+/**
  * The different types with which a radius can be measured
  * @enum {number}
  */
@@ -322,22 +328,28 @@ let _token_proximity_data = new Map();
 const _comma_splitter = /\s*,\s*/;// splits on commas with any amount of whitespace on both sides
 
 /**
- * Whether a token has a non-empty userlist
+ * The UUIDs of the users speaking through a token: its userlist, plus any active GM who has it selected
  * @param {foundry.documents.TokenDocument} token
- * @returns {boolean}
+ * @returns {Array<string>}
  */
-function _has_userlist(token) {
+function _get_token_speakers(token) {
   const userlist = token.getFlag(MODULE_ID, "userlist");
-  return typeof userlist === "string" && userlist.trim() !== "";
+  const speakers = typeof userlist === "string" ? userlist.split(_comma_splitter).filter(uuid => uuid !== "") : [];
+  for (const user of game.users) {
+    if (!user.isGM || !user.active || speakers.includes(user.uuid)) continue;
+    if (user.getFlag(MODULE_ID, "selected_tokens")?.includes(token.uuid)) speakers.push(user.uuid);
+  }
+  return speakers;
 }
 
 /**
  * Creates or replaces a token's proximity data from the token's current flags and (animated) position.
- * Tokens without a userlist have their proximity data removed instead.
+ * Tokens nobody speaks through have their proximity data removed instead.
  * @param {foundry.documents.TokenDocument} token the token whose proximity data is being rebuilt
  */
 function _rebuild_source(token) {
-  if (!_has_userlist(token)) {
+  const speakers = _get_token_speakers(token);
+  if (speakers.length === 0) {
     _token_proximity_data.delete(token.uuid);
     return;
   }
@@ -345,7 +357,7 @@ function _rebuild_source(token) {
   _token_proximity_data.set(token.uuid, {
     soundsource,
     name: token.name,
-    userlist: token.getFlag(MODULE_ID, "userlist").split(_comma_splitter).filter(uuid => uuid !== "")
+    userlist: speakers
   });
   _move_source(token);
 }
@@ -554,8 +566,26 @@ Hooks.on("deleteToken", (document, _options, _userId) => {
   _schedule_volume_update();
 });
 
+let _selection_timeout = null;
+
+/**
+ * Shares a GM's selected tokens through a user flag so players' clients know which tokens the GM speaks through.
+ * Selection changes come in bursts (release all, then control each), so only the settled selection is written.
+ */
+function _share_gm_selection() {
+  clearTimeout(_selection_timeout);
+  _selection_timeout = setTimeout(() => {
+    if (!game.user.isGM || !globalThis.canvas?.ready) return;
+    const selected = canvas.tokens.controlled.map(token => token.document.uuid).sort();
+    const current = game.user.getFlag(MODULE_ID, "selected_tokens") ?? [];
+    if (selected.length === current.length && selected.every((uuid, i) => uuid === current[i])) return;
+    game.user.setFlag(MODULE_ID, "selected_tokens", selected);
+  }, 250);
+}
+
 Hooks.on("controlToken", () => {
   _schedule_volume_update();// because volume is based on controlled tokens or owned tokens, so any control change could change the volume
+  if (game.user.isGM) _share_gm_selection();
 });
 
 Hooks.on("updateScene", (document, changed, _options, _userId) => {
@@ -566,14 +596,26 @@ Hooks.on("updateScene", (document, changed, _options, _userId) => {
 });
 
 Hooks.on("updateUser", (_document, changed, _options, _userId) => {
-  if (changed.flags?.[MODULE_ID] !== undefined) {
+  const flags = changed.flags?.[MODULE_ID];
+  if (flags !== undefined) {
+    if ("selected_tokens" in flags || "-=selected_tokens" in flags) _rebuild_all_sources();
     _schedule_volume_update();
     if (game.user.isGM) _refresh_gm_buttons();
   }
 });
 
-Hooks.on("userConnected", () => {
-  _schedule_volume_update();
+Hooks.on("userConnected", (user) => {
+  // a GM joining or leaving changes who speaks through the tokens they have selected
+  if (user.isGM && globalThis.canvas?.ready) _rebuild_all_sources();
+  else _schedule_volume_update();
+});
+
+Hooks.once("ready", () => {
+  const installed = game.modules.get(MODULE_ID).version;
+  if (installed === SCRIPT_VERSION) return;
+  const message = game.i18n.format("proximity-voice-chat.UI.StaleScript", { script: SCRIPT_VERSION, installed });
+  console.error(MODULE_ID + " | " + message);
+  ui.notifications.error(message, { permanent: true });
 });
 
 Hooks.on("canvasTearDown", (_canvas) => {
@@ -808,6 +850,7 @@ export function diagnose() {
   console.log(MODULE_ID + " | diagnose", {
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
+    script: SCRIPT_VERSION,
     canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
     sceneDisabled: !!globalThis.canvas?.scene?.getFlag(MODULE_ID, "disabled"),

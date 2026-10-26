@@ -12,6 +12,9 @@ repo="https://github.com/N0-Chance/proximity-voice-chat"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 1.2.3" >&2; exit 1; }
 git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "tag v$version already exists" >&2; exit 1; }
 
+sed -i "s/^const SCRIPT_VERSION = \"[^\"]*\";/const SCRIPT_VERSION = \"$version\";/" scripts/proximity-voice-chat.js
+grep -q "^const SCRIPT_VERSION = \"$version\";" scripts/proximity-voice-chat.js || { echo "failed to set SCRIPT_VERSION" >&2; exit 1; }
+
 tmp=$(mktemp)
 jq --arg v "$version" --arg d "$repo/releases/download/v$version/module.zip" \
   '.version = $v | .download = $d' module.json > "$tmp"

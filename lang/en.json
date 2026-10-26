@@ -26,5 +26,6 @@
   "proximity-voice-chat.UI.globalListen.On": "Global Listening on: you hear everyone.",
   "proximity-voice-chat.UI.globalListen.Off": "Global Listening off: you hear players near your selected tokens, or near tokens you speak through if none are selected.",
   "proximity-voice-chat.UI.globalSpeak.On": "Global Speaking on: everyone hears you.",
-  "proximity-voice-chat.UI.globalSpeak.Off": "Global Speaking off: players hear you only near tokens you speak through (token HUD podcast button)."
+  "proximity-voice-chat.UI.globalSpeak.Off": "Global Speaking off: players hear you only near the tokens you have selected, or tokens you've added yourself to with the token HUD.",
+  "proximity-voice-chat.UI.StaleScript": "Proximity Voice Chat: this browser is running an old cached copy of the module script ({script}) but {installed} is installed. Clear this site's cached files (Ctrl+Shift+Delete, \"Cached images and files\") and reload."
 }
