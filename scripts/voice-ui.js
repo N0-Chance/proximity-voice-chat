@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "1.3.2";
+export const UI_SCRIPT_VERSION = "1.4.0";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -440,8 +440,59 @@ function _open_volume_dialog(user) {
 }
 
 /* -------------------------------------------- */
+/*  Speaker list checkboxes                     */
+/* -------------------------------------------- */
+
+/**
+ * Replaces the speaker list's comma-separated UUID field with a checkbox per user. The field stays in the form,
+ * hidden, so the flag keeps its comma-separated format; the checkboxes rewrite it. Owners (see
+ * get_owner_speakers) always speak through the token, so they show ticked and locked.
+ * @param {foundry.applications.api.ApplicationV2} application a TokenConfig or PrototypeTokenConfig
+ * @param {HTMLElement} element
+ */
+function _add_speaker_choices(application, element) {
+  const input = element.querySelector('input[name="flags.proximity-voice-chat.userlist"]');
+  if (!input || input.type === "hidden") return;
+  const actor = application.document?.baseActor ?? application.actor ?? null;
+  const owners = new Set(api().get_owner_speakers(actor).map(user => user.uuid));
+  const listed = new Set(input.value.split(/\s*,\s*/).filter(Boolean));
+  input.type = "hidden";
+  const choices = document.createElement("div");
+  choices.className = "pvc-speaker-choices";
+  for (const user of game.users) {
+    const owner = owners.has(user.uuid);
+    const label = document.createElement("label");
+    label.className = "pvc-speaker-choice";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = user.uuid;
+    box.checked = owner || listed.has(user.uuid);
+    box.disabled = input.disabled || owner;
+    box.addEventListener("change", () => {
+      // keep any entries that aren't current users, e.g. deleted users or UUIDs typed by a macro
+      const unknown = input.value.split(/\s*,\s*/).filter(uuid => uuid && !game.users.some(u => u.uuid === uuid));
+      const checked = Array.from(choices.querySelectorAll("input")).filter(b => b.checked && !b.disabled).map(b => b.value);
+      input.value = [...unknown, ...checked].join(", ");
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const swatch = document.createElement("span");
+    swatch.className = "pvc-speaker-swatch";
+    swatch.style.backgroundColor = user.color?.css ?? "";
+    const name = document.createElement("span");
+    name.textContent = user.name + (user.isGM ? " [" + game.i18n.localize("USER.GM") + "]" : "")
+      + (owner ? " (" + game.i18n.localize("proximity-voice-chat.Token.Owner") + ")" : "");
+    label.append(box, swatch, name);
+    choices.append(label);
+  }
+  input.after(choices);
+}
+
+/* -------------------------------------------- */
 /*  Hooks                                       */
 /* -------------------------------------------- */
+
+Hooks.on("renderTokenConfig", _add_speaker_choices);
+Hooks.on("renderPrototypeTokenConfig", _add_speaker_choices);
 
 Hooks.once("ready", async () => {
   _apply_dock_visibility();

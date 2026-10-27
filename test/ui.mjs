@@ -12,6 +12,7 @@ class El {
     this.attrs = {};
     this.listeners = {};
     this.className = "";
+    this.style = {};
     this.classList = {
       add: (...c) => { const s = new Set(this._classes()); c.forEach(x => s.add(x)); this.className = [...s].join(" "); },
       remove: (...c) => { this.className = this._classes().filter(x => !c.includes(x)).join(" "); },
@@ -27,6 +28,7 @@ class El {
   after(k) { const p = this.parentElement; const i = p.children.indexOf(this); k.parentElement = p; p.children.splice(i + 1, 0, k); }
   remove() { const p = this.parentElement; if (p) p.children.splice(p.children.indexOf(this), 1); this.parentElement = null; }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+  dispatchEvent(event) { (this.dispatched ??= []).push(event.type); }
   async dispatch(type, event = {}) { for (const fn of this.listeners[type] ?? []) await fn({ preventDefault() {}, stopPropagation() {}, target: this, ...event }); }
   _matches(sel) {
     const m = sel.match(/^([a-z]+)?(#[\w-]+)?((?:\.[\w-]+)*)((?:\[[\w-]+="[^"]*"\])*)$/i);
@@ -66,6 +68,7 @@ class Sprite extends Container {
 globalThis.PIXI = { Container, Graphics, Sprite };
 
 // --- Foundry stubs
+globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 const hooks = {};
 globalThis.Hooks = { on: (n, f) => (hooks[n] ??= []).push(f), once: (n, f) => (hooks[n] ??= []).push(f), callAll: (n, ...a) => (hooks[n] ?? []).forEach(f => f(...a)) };
 const intervals = [];
@@ -308,6 +311,36 @@ const block = gmOptions.find(o => o.label === "WEBRTC.TooltipBlockUserAudio");
 check("GM gets Block Audio for players", block.visible(li("p2")) && !block.visible(li("gm")));
 block.onClick({}, li("p2"));
 check("Block Audio removes the player's broadcast permission", JSON.stringify(users[2].updates?.at(-1)) === JSON.stringify({ "permissions.BROADCAST_AUDIO": false }));
+
+// --- speaker list checkboxes (GM editing a token owned by Alice)
+function renderTokenConfig(value, disabled) {
+  const element = new El("form");
+  const tab = new El("div"); tab.className = "tab"; tab.dataset.tab = "proximity";
+  const input = new El("input"); input.type = "text"; input.value = value; input.disabled = disabled;
+  input.attrs.name = "flags.proximity-voice-chat.userlist";
+  tab.append(input); element.append(tab);
+  const actor = { id: "amiri", ownership: { default: 0, p1: 3 } };
+  Hooks.callAll("renderTokenConfig", { document: { baseActor: actor }, actor }, element, {}, {});
+  return { element, input, boxes: element.querySelectorAll("input").filter(i => i.type === "checkbox") };
+}
+{
+  const { input, boxes } = renderTokenConfig("User.p2, User.deleted", false);
+  const box = uuid => boxes.find(b => b.value === uuid);
+  check("UUID field is hidden and replaced by a checkbox per user", input.type === "hidden" && boxes.length === 3);
+  check("listed user (Bob) is ticked", box("User.p2").checked && !box("User.p2").disabled);
+  check("owner (Alice) is ticked and locked", box("User.p1").checked && box("User.p1").disabled);
+  check("owner is labelled", box("User.p1").parentElement.children.at(-1).textContent.includes("proximity-voice-chat.Token.Owner"));
+  check("unlisted GM is unticked", !box("User.gm").checked);
+  box("User.gm").checked = true; await box("User.gm").dispatch("change");
+  check("ticking the GM rewrites the field, keeping unknown UUIDs and leaving owners implicit", input.value === "User.deleted, User.gm, User.p2", input.value);
+  check("the change is announced to the form", (input.dispatched ?? []).includes("change"));
+  box("User.p2").checked = false; await box("User.p2").dispatch("change");
+  check("unticking Bob removes him", input.value === "User.deleted, User.gm", input.value);
+}
+{
+  const { boxes } = renderTokenConfig("User.p2", true);
+  check("players see the checkboxes read-only", boxes.every(b => b.disabled));
+}
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");
 process.exit(fails ? 1 : 0);

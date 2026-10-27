@@ -130,6 +130,7 @@ class SimplePeerAVClient {
 }
 
 // --- minimal Foundry globals so the module can load and run its init hook
+globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 const hooks = {};
 globalThis.Hooks = { on: (n, f) => (hooks[n] ??= []).push(f), once: (n, f) => (hooks[n] ??= []).push(f), callAll: (n, ...a) => (hooks[n] ?? []).forEach(f => f(...a)) };
 const el = () => ({ classList: { add() {}, toggle() {} }, setAttribute() {}, getAttribute() {}, appendChild() {}, append() {} });

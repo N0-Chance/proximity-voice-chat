@@ -6,7 +6,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.3.2";
+const SCRIPT_VERSION = "1.4.0";
 
 /**
  * The different types with which a radius can be measured
@@ -277,6 +277,15 @@ Hooks.on("init", async () => {
       [RADIUS_TYPE.TILES]: "proximity-voice-chat.RadiusType.Tiles"
     }
   });
+  await game.settings.register(MODULE_ID, "ownersSpeak", {
+    name: "proximity-voice-chat.Settings.OwnersSpeak.Label",
+    hint: "proximity-voice-chat.Settings.OwnersSpeak.Hint",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => _rebuild_all_sources()
+  });
   await game.settings.register(MODULE_ID, "debug", {
     name: "proximity-voice-chat.Settings.Debug.Label",
     hint: "proximity-voice-chat.Settings.Debug.Hint",
@@ -320,6 +329,8 @@ Hooks.on("init", async () => {
     is_global_speaker,
     toggle_global_listener,
     toggle_global_speaker,
+    get_owner_speakers,
+    get_token_speakers,
     get_user_volume,
     get_speaking_token_uuids,
     diagnose
@@ -335,13 +346,34 @@ let _token_proximity_data = new Map();
 const _comma_splitter = /\s*,\s*/;// splits on commas with any amount of whitespace on both sides
 
 /**
- * The UUIDs of the users speaking through a token: its userlist, plus any active GM who has it selected
+ * The players who speak through an actor's tokens without being on their speaker lists: those whose assigned
+ * character it is, or who were given Owner permission on it. Default "all players" ownership doesn't count, or
+ * everyone would speak through shared tokens like loot piles, and GMs are left out because they own everything.
+ * @param {foundry.documents.Actor | null | undefined} actor
+ * @returns {Array<foundry.documents.User>}
+ */
+export function get_owner_speakers(actor) {
+  if (!actor || !game.settings.get(MODULE_ID, "ownersSpeak")) return [];
+  const owner = CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER;
+  return game.users.filter(user => !user.isGM && (user.character?.id === actor.id || (actor.ownership?.[user.id] ?? 0) >= owner));
+}
+
+/**
+ * The UUIDs of the users speaking through a token: its owners, its speaker list, and any active GM who has it selected
  * @param {foundry.documents.TokenDocument} token
  * @returns {Array<string>}
  */
+export function get_token_speakers(token) {
+  return _get_token_speakers(token);
+}
+
 function _get_token_speakers(token) {
   const userlist = token.getFlag(MODULE_ID, "userlist");
   const speakers = typeof userlist === "string" ? userlist.split(_comma_splitter).filter(uuid => uuid !== "") : [];
+  // unlinked tokens carry a synthetic actor; ownership lives on the actor they were made from
+  for (const user of get_owner_speakers(token.baseActor ?? token.actor)) {
+    if (!speakers.includes(user.uuid)) speakers.push(user.uuid);
+  }
   for (const user of game.users) {
     if (!user.isGM || !user.active || speakers.includes(user.uuid)) continue;
     if (user.getFlag(MODULE_ID, "selected_tokens")?.includes(token.uuid)) speakers.push(user.uuid);
@@ -429,7 +461,7 @@ function _is_voice_active() {
 function _get_listener_tokens() {
   if (!globalThis.canvas?.ready) return [];
   if (canvas.tokens.controlled.length > 0) return canvas.tokens.controlled;
-  const speaking_through = canvas.tokens.placeables.filter(token => is_user_in_userlist(token.document, game.user.uuid));
+  const speaking_through = canvas.tokens.placeables.filter(token => _get_token_speakers(token.document).includes(game.user.uuid));
   if (game.user.isGM) return speaking_through;
   // a player also listens through tokens they speak through but don't own, e.g. a companion NPC
   return [...new Set([...canvas.tokens.ownedTokens, ...speaking_through])];
@@ -582,6 +614,11 @@ Hooks.on("createToken", (document, _options, _userId) => {
   _schedule_volume_update();
 });
 
+Hooks.on("updateActor", (_actor, changed, _options, _userId) => {
+  // owners speak through their actor's tokens
+  if ("ownership" in changed && globalThis.canvas?.ready) _rebuild_all_sources();
+});
+
 Hooks.on("deleteToken", (document, _options, _userId) => {
   _token_proximity_data.delete(document.uuid);
   _schedule_volume_update();
@@ -618,6 +655,8 @@ Hooks.on("updateScene", (document, changed, _options, _userId) => {
 });
 
 Hooks.on("updateUser", (_document, changed, _options, _userId) => {
+  // a player's assigned character speaks for them
+  if ("character" in changed && globalThis.canvas?.ready) _rebuild_all_sources();
   const flags = changed.flags?.[MODULE_ID];
   if (flags !== undefined) {
     if ("selected_tokens" in flags || "-=selected_tokens" in flags) _rebuild_all_sources();

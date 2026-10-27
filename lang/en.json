@@ -12,7 +12,7 @@
   "proximity-voice-chat.Settings.DefaultProximityRadius.Hint": "The amount of units the radius will be. Example: 100",
   "proximity-voice-chat.Settings.DefaultProximityRadiusType.Label": "Radius Type",
   "proximity-voice-chat.Settings.DefaultProximityRadiusType.Hint": "The units with which the Default Proximity Radius is measured.",
-  "proximity-voice-chat.Token.UserList.Label": "List of user UUIDs that speak from this token. Separated with commas.",
+  "proximity-voice-chat.Token.UserList.Label": "Who speaks through this token",
   "proximity-voice-chat.Token.UserList.Hint": "Example: User.TyKhb00c4SFsBeGc, User.WSvUdrPmRvr1lWvY",
   "proximity-voice-chat.Token.ProximityRadius.Label": "Proximity Radius",
   "proximity-voice-chat.Token.ProximityRadius.Hint": "Example: 100",
@@ -45,5 +45,8 @@
   "proximity-voice-chat.UI.Deafen": "Toggle deafen (mute everyone for you)",
   "proximity-voice-chat.UI.AVSettings": "Open audio/video settings",
   "proximity-voice-chat.UI.Volume": "Voice Volume",
-  "proximity-voice-chat.UI.VolumeTitle": "Voice volume: {name}"
+  "proximity-voice-chat.UI.VolumeTitle": "Voice volume: {name}",
+  "proximity-voice-chat.Token.Owner": "owner",
+  "proximity-voice-chat.Settings.OwnersSpeak.Label": "Owners Speak Through Their Tokens",
+  "proximity-voice-chat.Settings.OwnersSpeak.Hint": "Players speak through tokens of their assigned character, and of actors they've been given Owner permission on, without being added to the token's speaker list. Default \"all players\" ownership doesn't count."
 }

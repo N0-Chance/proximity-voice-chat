@@ -13,9 +13,12 @@ https://github.com/N0-Chance/proximity-voice-chat/releases/latest/download/modul
 Updates arrive through Foundry's own **Check for Updates**. Requires Foundry v14 with the built-in audio/video chat set to Audio Only or Audio/Video.
 
 ## How it works
-Each token has a **speaker list**: the users whose voice comes from that token. Edit it in the token's **Proximity** tab (comma-separated user UUIDs, e.g. `User.TyKhb00c4SFsBeGc`), or as a GM use the podcast button in the token HUD to add or remove yourself.
+Each token has **speakers**: the users whose voice comes from it.
 
-- **Speaking:** your voice comes from every token whose speaker list includes you.
+- **Owners speak automatically.** A player speaks through tokens of their assigned character, and of actors they've been given Owner permission on. Most player tokens need no setup.
+- **The speaker list adds anyone else**, such as a player voicing a companion NPC. Tick users in the token's **Proximity** tab, or as a GM use the podcast button in the token HUD to add or remove yourself.
+
+- **Speaking:** your voice comes from every token you're a speaker of.
 - **Listening:** you hear from your selected tokens. If none are selected, you hear from every token you own or speak through.
 - **Volume** fades with distance out to the token's proximity radius, and walls block it.
 
@@ -44,6 +47,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 ## Settings
 | Setting | Scope | Default | What it does |
 |---|---|---|---|
+| Owners Speak Through Their Tokens | World | On | Players speak through tokens they own without being on the speaker list |
 | Default Proximity Radius | World | 1200 | How far voices carry, unless a token or scene sets its own radius |
 | Radius Type | World | Pixels | Whether the default radius is in pixels or grid tiles |
 | Hide Camera Dock | World | On | Hides Foundry's camera dock for everyone; voice keeps working |
@@ -70,6 +74,14 @@ It prints one row per other user. Each row shows their current volume and why, a
 
 ## Differences from upstream
 Compared with upstream 1.1.0, which was verified on Foundry 14.363.
+
+### Speaker lists
+- **Owners speak through their tokens automatically** ("Owners Speak Through Their Tokens").
+  - Why: upstream needs every token's speaker list filled in by hand, even for each player's own character.
+  - Owners always count, not only when a token's list is empty. Otherwise a GM adding themselves to a player's token would silently stop the player speaking through it.
+  - Default "all players" ownership doesn't count, so shared tokens such as loot piles don't carry everyone's voice.
+- **The speaker list is a checkbox per user**, not a text field of user UUIDs.
+  - Owners show ticked and locked. The flag keeps upstream's comma-separated format, so the API and existing worlds are unaffected.
 
 ### GM behaviour
 - **The GM is heard and hears everyone by default.**
@@ -130,8 +142,10 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 ## API
 Available at `game.modules.get("proximity-voice-chat").api` for macros and other modules.
 
-### Speaker lists
-* `get_userlist(token: TokenDocument): string | undefined`
+### Speakers
+* `get_token_speakers(token: TokenDocument): string[]`: user UUIDs of everyone speaking through the token (owners, speaker list, and a GM who has it selected)
+* `get_owner_speakers(actor: Actor): User[]`: the players who speak through an actor's tokens as owners
+* `get_userlist(token: TokenDocument): string | undefined`: the speaker list itself, as comma-separated user UUIDs
 * `set_userlist(token: TokenDocument, userlist: string): Promise<any>`
 * `is_user_in_userlist(token: TokenDocument, user_uuid: string): boolean`
 * `add_user_to_userlist(token: TokenDocument, user_uuid: string): Promise<any>`

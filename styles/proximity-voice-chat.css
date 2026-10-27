@@ -87,4 +87,25 @@
   #players .pvc-voice-button[data-pvc-action="deafen"].active {
     color: var(--color-level-error, #d33);
   }
+
+  /* Speaker list checkboxes in the token's Proximity tab */
+  .pvc-speaker-choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+    gap: 2px 12px;
+    margin: 4px 0 8px;
+  }
+
+  .pvc-speaker-choice {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .pvc-speaker-swatch {
+    flex: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
 }

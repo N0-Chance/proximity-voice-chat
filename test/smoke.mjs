@@ -53,6 +53,7 @@ globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ?? mkMedia(id) 
 const click = async (button) => { await button.onclick({ preventDefault() {}, stopPropagation() {} }); await new Promise(r => setTimeout(r, 5)); };
 globalThis.fromUuid = async () => null;
 
+globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 let fails = 0;
 const intervals = []; globalThis.setInterval = (fn) => (intervals.push(fn), 0); // keep node from hanging
 // Foundry only creates the canvas global during setup, after module scripts have loaded and timers can fire
@@ -167,6 +168,23 @@ users[0].flags.selected_tokens = [tokens[2].document.uuid];// left over from a p
 becomeUser("gm"); await wait(300);
 check("leftover GM selection cleared when the canvas loads", JSON.stringify(users[0].flags.selected_tokens) === "[]", JSON.stringify(users[0].flags.selected_tokens));
 becomeUser("p1"); await tick();
+// --- 1.4: owners speak through their tokens without being on the speaker list
+// Bob's pet sits next to Alice; Bob is far away, and the pet's speaker list is empty
+const pet = { id: "pet", ownership: { default: 0, p2: 3 } };
+const petToken = mkToken("pet", 0, 0, "", "p2"); petToken.document.baseActor = pet; petToken.document.parent = scene;
+scene.tokens.push(petToken.document); canvas.tokens.placeables.push({ document: petToken.document, isOwner: false });
+Hooks.callAll("createToken", petToken.document); await tick();
+expect("Alice hears Bob through his pet (Owner permission, empty speaker list)", media.p2.volume, 0.64);
+pet.ownership = { default: 3 };// "all players" ownership only
+Hooks.callAll("updateActor", pet, { ownership: pet.ownership }); await tick();
+expect("default 'all players' ownership doesn't make Bob speak through it", media.p2.volume, 0);
+users[2].character = pet;// Bob's assigned character
+Hooks.callAll("updateUser", users[2], { character: "pet" }); await tick();
+expect("an assigned character speaks for its player", media.p2.volume, 0.64);
+settings.ownersSpeak = false; Hooks.callAll("canvasReady", canvas); await tick();
+expect("with 'Owners Speak Through Their Tokens' off, only the speaker list counts", media.p2.volume, 0);
+settings.ownersSpeak = true; users[2].character = null; pet.ownership = { default: 0 };
+Hooks.callAll("canvasReady", canvas); await tick();
 // userlist removed via flag update
 tokens[1].document.flags["proximity-voice-chat"].userlist = ""; Hooks.callAll("updateToken", tokens[1].document, { flags: { "proximity-voice-chat": { userlist: "" } } }); await tick();
 const rows = game.modules.get("proximity-voice-chat").api.diagnose();
