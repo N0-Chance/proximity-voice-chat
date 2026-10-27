@@ -88,24 +88,37 @@
     color: var(--color-level-error, #d33);
   }
 
-  /* Speaker list checkboxes in the token's Proximity tab */
-  .pvc-speaker-choices {
+  /* Speaker and listener checkboxes in the token's Proximity tab */
+  .pvc-user-choices {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
     gap: 2px 12px;
     margin: 4px 0 8px;
   }
 
-  .pvc-speaker-choice {
+  .pvc-user-choice {
     display: flex;
     align-items: center;
     gap: 6px;
   }
 
-  .pvc-speaker-swatch {
+  .pvc-user-swatch {
     flex: none;
     width: 10px;
     height: 10px;
     border-radius: 50%;
+  }
+
+  /* Players who hear everyone or are heard by everyone */
+  #players li.player .pvc-global-markers {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: auto;
+    padding-left: 0.5em;
+    opacity: 0.7;
+  }
+
+  #players li.player.pvc-speaking .pvc-global-markers {
+    margin-left: 0;
   }
 }

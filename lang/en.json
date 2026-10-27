@@ -50,5 +50,16 @@
   "proximity-voice-chat.Settings.OwnersSpeak.Label": "Owners Speak Through Their Tokens",
   "proximity-voice-chat.Settings.OwnersSpeak.Hint": "Players speak through tokens of their assigned character, and of actors they've been given Owner permission on, without being added to the token's speaker list. Default \"all players\" ownership doesn't count.",
   "proximity-voice-chat.Settings.SpeakingThreshold.Label": "Speaking Cue Threshold (dB)",
-  "proximity-voice-chat.Settings.SpeakingThreshold.Hint": "How loud someone's voice must be, as you receive it, to show a speaking cue. Lower is more sensitive; raise it if background noise lights people up. Doesn't affect when anyone transmits."
+  "proximity-voice-chat.Settings.SpeakingThreshold.Hint": "How loud someone's voice must be, as you receive it, to show a speaking cue. Lower is more sensitive; raise it if background noise lights people up. Doesn't affect when anyone transmits.",
+  "proximity-voice-chat.Token.ListenList.Label": "Who also listens through this token",
+  "proximity-voice-chat.UI.GlobalListenOn": "Turn On Global Listening",
+  "proximity-voice-chat.UI.GlobalListenOff": "Turn Off Global Listening",
+  "proximity-voice-chat.UI.GlobalSpeakOn": "Turn On Global Speaking",
+  "proximity-voice-chat.UI.GlobalSpeakOff": "Turn Off Global Speaking",
+  "proximity-voice-chat.UI.GlobalListenOnNotice": "{name} now hears everyone.",
+  "proximity-voice-chat.UI.GlobalListenOffNotice": "{name} now hears by proximity.",
+  "proximity-voice-chat.UI.GlobalSpeakOnNotice": "Everyone now hears {name}.",
+  "proximity-voice-chat.UI.GlobalSpeakOffNotice": "{name} is now heard by proximity.",
+  "proximity-voice-chat.UI.MarkerGlobalListener": "Hears everyone (Global Listening)",
+  "proximity-voice-chat.UI.MarkerGlobalSpeaker": "Heard by everyone (Global Speaking)"
 }

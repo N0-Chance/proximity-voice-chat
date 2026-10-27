@@ -185,6 +185,21 @@ settings.ownersSpeak = false; Hooks.callAll("canvasReady", canvas); await tick()
 expect("with 'Owners Speak Through Their Tokens' off, only the speaker list counts", media.p2.volume, 0);
 settings.ownersSpeak = true; users[2].character = null; pet.ownership = { default: 0 };
 Hooks.callAll("canvasReady", canvas); await tick();
+// --- listen list: Alice rides along through a token next to Bob, even with her own (far) token selected
+tokens[1].document.x = 3000; tokens[1].document._source.x = 3000; Hooks.callAll("canvasReady", canvas); await tick();
+canvas.tokens.controlled = [{ document: tokens[0].document, isOwner: true }]; Hooks.callAll("controlToken"); await tick();
+expect("Alice (own token selected) can't hear far-away Bob", media.p2.volume, 0);
+const setListenlist = (t, list) => { t.document.flags["proximity-voice-chat"].listenlist = list; Hooks.callAll("updateToken", t.document, { flags: { "proximity-voice-chat": { listenlist: list } } }); };
+tokens[2].document.x = 3000; tokens[2].document._source.x = 3000; Hooks.callAll("canvasReady", canvas);
+setListenlist(tokens[2], "User.p1"); await tick();
+expect("Alice hears Bob through a token whose listen list includes her, on top of her selected token", media.p2.volume, 0.64);
+setListenlist(tokens[2], ""); await tick();
+expect("removed from the listen list, she can't", media.p2.volume, 0);
+// --- a GM can make another user a global listener (e.g. a recording user)
+await game.modules.get("proximity-voice-chat").api.set_global_listener(users[1], true); await tick();
+expect("Alice set as a global listener by the GM hears Bob anywhere", media.p2.volume, 0.64);
+await game.modules.get("proximity-voice-chat").api.set_global_listener(users[1], false); await tick();
+canvas.tokens.controlled = []; Hooks.callAll("controlToken"); await tick();
 // userlist removed via flag update
 tokens[1].document.flags["proximity-voice-chat"].userlist = ""; Hooks.callAll("updateToken", tokens[1].document, { flags: { "proximity-voice-chat": { userlist: "" } } }); await tick();
 const rows = game.modules.get("proximity-voice-chat").api.diagnose();

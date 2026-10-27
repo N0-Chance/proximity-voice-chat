@@ -6,7 +6,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.4.1";
+const SCRIPT_VERSION = "1.5.0";
 
 /**
  * The different types with which a radius can be measured
@@ -81,6 +81,67 @@ export function remove_user_from_userlist(token, user_uuid) {
   const comma_splitter = /\s*,\s*/;
   let userlist_array = userlist.split(comma_splitter).filter(uuid => uuid !== user_uuid).join(",");
   return token.setFlag(MODULE_ID, "userlist", userlist_array);
+}
+
+/**
+ * Gets a token's listen list: users who also hear through this token, on top of their own tokens
+ * @param {foundry.documents.TokenDocument} token
+ * @returns {string | undefined} comma separated user UUIDs, or undefined if the token has no listen list
+ */
+export function get_listenlist(token) {
+  return token.getFlag(MODULE_ID, "listenlist");
+}
+
+/**
+ * Sets a token's listen list
+ * @param {foundry.documents.TokenDocument} token
+ * @param {string} listenlist comma separated user UUIDs
+ * @returns {Promise}
+ */
+export function set_listenlist(token, listenlist) {
+  return token.setFlag(MODULE_ID, "listenlist", listenlist);
+}
+
+/**
+ * Checks if a user is in a token's listen list
+ * @param {foundry.documents.TokenDocument} token
+ * @param {string} user_uuid
+ * @returns {boolean}
+ */
+export function is_user_in_listenlist(token, user_uuid) {
+  return _split_uuids(token.getFlag(MODULE_ID, "listenlist")).includes(user_uuid);
+}
+
+/**
+ * Adds a user to a token's listen list
+ * @param {foundry.documents.TokenDocument} token
+ * @param {string} user_uuid
+ * @returns {Promise}
+ */
+export function add_user_to_listenlist(token, user_uuid) {
+  const listenlist = _split_uuids(token.getFlag(MODULE_ID, "listenlist"));
+  if (!listenlist.includes(user_uuid)) listenlist.push(user_uuid);
+  return token.setFlag(MODULE_ID, "listenlist", listenlist.join(","));
+}
+
+/**
+ * Removes a user from a token's listen list
+ * @param {foundry.documents.TokenDocument} token
+ * @param {string} user_uuid
+ * @returns {Promise | void} nothing if the token had no listen list
+ */
+export function remove_user_from_listenlist(token, user_uuid) {
+  const listenlist = token.getFlag(MODULE_ID, "listenlist");
+  if (!listenlist) return;
+  return token.setFlag(MODULE_ID, "listenlist", _split_uuids(listenlist).filter(uuid => uuid !== user_uuid).join(","));
+}
+
+/**
+ * @param {string | undefined} list comma separated UUIDs
+ * @returns {Array<string>}
+ */
+function _split_uuids(list) {
+  return typeof list === "string" ? list.split(/\s*,\s*/).filter(uuid => uuid !== "") : [];
 }
 
 /**
@@ -327,8 +388,15 @@ Hooks.on("init", async () => {
     set_scene_disabled,
     is_global_listener,
     is_global_speaker,
+    set_global_listener,
+    set_global_speaker,
     toggle_global_listener,
     toggle_global_speaker,
+    get_listenlist,
+    set_listenlist,
+    is_user_in_listenlist,
+    add_user_to_listenlist,
+    remove_user_from_listenlist,
     get_owner_speakers,
     get_token_speakers,
     get_user_volume,
@@ -455,16 +523,22 @@ function _is_voice_active() {
 /**
  * The tokens this client listens through: the controlled tokens, or if none are controlled, every owned token and
  * every token they speak through for players. A GM owns every token, so with nothing selected a GM listens only
- * through tokens they speak through. Without a canvas there is nothing to listen through.
+ * through tokens they speak through. Tokens whose listen list includes the user are always added.
+ * Without a canvas there is nothing to listen through.
  * @returns {Array<foundry.canvas.placeables.Token>}
  */
 function _get_listener_tokens() {
   if (!globalThis.canvas?.ready) return [];
-  if (canvas.tokens.controlled.length > 0) return canvas.tokens.controlled;
-  const speaking_through = canvas.tokens.placeables.filter(token => _get_token_speakers(token.document).includes(game.user.uuid));
-  if (game.user.isGM) return speaking_through;
-  // a player also listens through tokens they speak through but don't own, e.g. a companion NPC
-  return [...new Set([...canvas.tokens.ownedTokens, ...speaking_through])];
+  // tokens whose listen list includes you always count, on top of your own, e.g. riding along with another player
+  const listening_through = canvas.tokens.placeables.filter(token => is_user_in_listenlist(token.document, game.user.uuid));
+  let own;
+  if (canvas.tokens.controlled.length > 0) own = canvas.tokens.controlled;
+  else {
+    const speaking_through = canvas.tokens.placeables.filter(token => _get_token_speakers(token.document).includes(game.user.uuid));
+    // a player also listens through tokens they speak through but don't own, e.g. a companion NPC
+    own = game.user.isGM ? speaking_through : [...canvas.tokens.ownedTokens, ...speaking_through];
+  }
+  return [...new Set([...own, ...listening_through])];
 }
 
 /**
@@ -590,6 +664,8 @@ Hooks.on("updateToken", (document, changed, _options, _userId) => {
   if (document.parent !== globalThis.canvas?.scene) return;
   const flags = changed.flags?.[MODULE_ID];
   if (!flags) return;
+  // the listen list only changes where people listen from, which is worked out on every volume update
+  if ("listenlist" in flags || "-=listenlist" in flags) _schedule_volume_update();
   if (["userlist", "radius", "radius_type", "-=userlist", "-=radius", "-=radius_type"].some(key => key in flags)) {
     _rebuild_source(document);
     Hooks.callAll("updateTokenProximitySettings", document, flags.userlist, flags.radius);
@@ -881,6 +957,26 @@ function _patch_simplepeer() {
     if (peer && fingerprint) peer[_PEER_REMOTE_FINGERPRINT] ??= fingerprint;
     return result;
   };
+}
+
+/**
+ * Sets whether a user hears everyone. A GM can set it for any user, e.g. a user that records the session.
+ * @param {foundry.documents.User} user
+ * @param {boolean} enabled
+ * @returns {Promise}
+ */
+export function set_global_listener(user, enabled) {
+  return user.setFlag(MODULE_ID, "global_listener", enabled);
+}
+
+/**
+ * Sets whether everyone hears a user. A GM can set it for any user.
+ * @param {foundry.documents.User} user
+ * @param {boolean} enabled
+ * @returns {Promise}
+ */
+export function set_global_speaker(user, enabled) {
+  return user.setFlag(MODULE_ID, "global_speaker", enabled);
 }
 
 /**

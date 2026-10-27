@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "1.4.1";
+export const UI_SCRIPT_VERSION = "1.5.0";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -297,6 +297,31 @@ function _update_pulse() {
 /*  Players list                                */
 /* -------------------------------------------- */
 
+/**
+ * Marks players who hear everyone or are heard by everyone, so the table can see, e.g., that a recording user
+ * is listening. GMs are left unmarked since that's their default.
+ */
+function _update_global_markers() {
+  for (const row of ui.players?.element?.querySelectorAll("li.player") ?? []) {
+    const user = game.users.get(row.dataset.userId);
+    row.querySelector(".pvc-global-markers")?.remove();
+    if (!user || user.isGM) continue;
+    const markers = [];
+    if (api().is_global_listener(user)) markers.push(["fa-solid fa-ear-listen", "proximity-voice-chat.UI.MarkerGlobalListener"]);
+    if (api().is_global_speaker(user)) markers.push(["fa-solid fa-bullhorn", "proximity-voice-chat.UI.MarkerGlobalSpeaker"]);
+    if (!markers.length) continue;
+    const holder = document.createElement("span");
+    holder.className = "pvc-global-markers";
+    for (const [icon, tooltip] of markers) {
+      const glyph = document.createElement("i");
+      glyph.className = icon;
+      glyph.dataset.tooltip = tooltip;
+      holder.append(glyph);
+    }
+    row.append(holder);
+  }
+}
+
 function _update_player_row(user_id) {
   const row = ui.players?.element?.querySelector(`li.player[data-user-id="${user_id}"]`);
   if (!row) return;
@@ -454,55 +479,64 @@ function _open_volume_dialog(user) {
 /* -------------------------------------------- */
 
 /**
- * Replaces the speaker list's comma-separated UUID field with a checkbox per user. The field stays in the form,
- * hidden, so the flag keeps its comma-separated format; the checkboxes rewrite it. Owners (see
- * get_owner_speakers) always speak through the token, so they show ticked and locked.
- * @param {foundry.applications.api.ApplicationV2} application a TokenConfig or PrototypeTokenConfig
- * @param {HTMLElement} element
+ * Replaces a comma-separated user UUID field with a checkbox per user. The field stays in the form, hidden, so the
+ * flag keeps its comma-separated format; the checkboxes rewrite it.
+ * @param {HTMLInputElement} input
+ * @param {Set<string>} locked user UUIDs that always count and can't be unticked here, e.g. owners for speakers
  */
-function _add_speaker_choices(application, element) {
-  const input = element.querySelector('input[name="flags.proximity-voice-chat.userlist"]');
+function _add_user_choices(input, locked = new Set()) {
   if (!input || input.type === "hidden") return;
-  const actor = application.document?.baseActor ?? application.actor ?? null;
-  const owners = new Set(api().get_owner_speakers(actor).map(user => user.uuid));
   const listed = new Set(input.value.split(/\s*,\s*/).filter(Boolean));
   input.type = "hidden";
   const choices = document.createElement("div");
-  choices.className = "pvc-speaker-choices";
+  choices.className = "pvc-user-choices";
   for (const user of game.users) {
-    const owner = owners.has(user.uuid);
+    const is_locked = locked.has(user.uuid);
     const label = document.createElement("label");
-    label.className = "pvc-speaker-choice";
+    label.className = "pvc-user-choice";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.value = user.uuid;
-    box.checked = owner || listed.has(user.uuid);
-    box.disabled = input.disabled || owner;
+    box.checked = is_locked || listed.has(user.uuid);
+    box.disabled = input.disabled || is_locked;
     box.addEventListener("change", () => {
-      // keep any entries that aren't current users, e.g. deleted users or UUIDs typed by a macro
+      // keep any entries that aren't current users, e.g. deleted users or UUIDs set by a macro
       const unknown = input.value.split(/\s*,\s*/).filter(uuid => uuid && !game.users.some(u => u.uuid === uuid));
       const checked = Array.from(choices.querySelectorAll("input")).filter(b => b.checked && !b.disabled).map(b => b.value);
       input.value = [...unknown, ...checked].join(", ");
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
     const swatch = document.createElement("span");
-    swatch.className = "pvc-speaker-swatch";
+    swatch.className = "pvc-user-swatch";
     swatch.style.backgroundColor = user.color?.css ?? "";
     const name = document.createElement("span");
     name.textContent = user.name + (user.isGM ? " [" + game.i18n.localize("USER.GM") + "]" : "")
-      + (owner ? " (" + game.i18n.localize("proximity-voice-chat.Token.Owner") + ")" : "");
+      + (is_locked ? " (" + game.i18n.localize("proximity-voice-chat.Token.Owner") + ")" : "");
     label.append(box, swatch, name);
     choices.append(label);
   }
   input.after(choices);
 }
 
+/**
+ * Adds the speaker and listener checkboxes to a token's Proximity tab. Owners always speak through their tokens
+ * (see get_owner_speakers), so they show ticked and locked in the speaker list.
+ * @param {foundry.applications.api.ApplicationV2} application a TokenConfig or PrototypeTokenConfig
+ * @param {HTMLElement} element
+ */
+function _add_token_user_choices(application, element) {
+  const actor = application.document?.baseActor ?? application.actor ?? null;
+  const owners = new Set(api().get_owner_speakers(actor).map(user => user.uuid));
+  _add_user_choices(element.querySelector('input[name="flags.proximity-voice-chat.userlist"]'), owners);
+  _add_user_choices(element.querySelector('input[name="flags.proximity-voice-chat.listenlist"]'));
+}
+
 /* -------------------------------------------- */
 /*  Hooks                                       */
 /* -------------------------------------------- */
 
-Hooks.on("renderTokenConfig", _add_speaker_choices);
-Hooks.on("renderPrototypeTokenConfig", _add_speaker_choices);
+Hooks.on("renderTokenConfig", _add_token_user_choices);
+Hooks.on("renderPrototypeTokenConfig", _add_token_user_choices);
 
 Hooks.once("ready", async () => {
   _apply_dock_visibility();
@@ -522,6 +556,7 @@ Hooks.once("ready", async () => {
 
 Hooks.on("renderPlayers", (_application, element, _context, _options) => {
   _add_voice_bar(element);
+  _update_global_markers();
   for (const user_id of _speakers.keys()) _update_player_row(user_id);
 });
 
@@ -533,6 +568,25 @@ Hooks.on("getUserContextOptions", (_application, options) => {
       visible: li => _is_voice_active() && li.dataset.userId !== game.user.id && !!game.users.get(li.dataset.userId)?.active,
       onClick: (_event, li) => _open_volume_dialog(game.users.get(li.dataset.userId))
     },
+    ...[
+      ["proximity-voice-chat.UI.GlobalListenOn", "fa-solid fa-ear-listen", "is_global_listener", "set_global_listener", true],
+      ["proximity-voice-chat.UI.GlobalListenOff", "fa-solid fa-ear-deaf", "is_global_listener", "set_global_listener", false],
+      ["proximity-voice-chat.UI.GlobalSpeakOn", "fa-solid fa-bullhorn", "is_global_speaker", "set_global_speaker", true],
+      ["proximity-voice-chat.UI.GlobalSpeakOff", "fa-solid fa-volume-xmark", "is_global_speaker", "set_global_speaker", false]
+    ].map(([label, icon, is, set, enable]) => ({
+      label,
+      icon,
+      // e.g. a user that records the session hears everyone; your own toggles are on the voice bar
+      visible: li => {
+        const user = game.users.get(li.dataset.userId);
+        return _is_voice_active() && game.user.isGM && !!user && !user.isSelf && api()[is](user) !== enable;
+      },
+      onClick: async (_event, li) => {
+        const user = game.users.get(li.dataset.userId);
+        await api()[set](user, enable);
+        ui.notifications.info(game.i18n.format(label + "Notice", { name: user.name }));
+      }
+    })),
     {
       label: "WEBRTC.TooltipBlockUserAudio",
       icon: "fa-solid fa-microphone-slash",
@@ -556,7 +610,9 @@ Hooks.on("rtcSettingsChanged", () => {
 });
 
 Hooks.on("updateUser", (user, changed) => {
-  if (user.isSelf && changed.flags?.[MODULE_ID]) _refresh_voice_bar();
+  if (!changed.flags?.[MODULE_ID]) return;
+  if (user.isSelf) _refresh_voice_bar();
+  _update_global_markers();
 });
 
 Hooks.on("userConnected", () => _reconcile_speakers());

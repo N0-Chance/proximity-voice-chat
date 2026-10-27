@@ -20,6 +20,7 @@ Each token has **speakers**: the users whose voice comes from it.
 
 - **Speaking:** your voice comes from every token you're a speaker of.
 - **Listening:** you hear from your selected tokens. If none are selected, you hear from every token you own or speak through.
+- **The listen list adds extra listening points.** If you're on a token's listen list, you always hear through it as well, even with your own token selected. Use it for a player riding along after their character dies, or a token everyone hears through. Tick users in the token's **Proximity** tab.
 - **Volume** fades with distance out to the token's proximity radius, and walls block it.
 
 The radius is set per token, per scene, or as a world default, in pixels or grid tiles. A scene can also turn proximity off entirely, so everyone hears everyone. Without a canvas (e.g. "Disable Game Canvas"), you hear only global speakers.
@@ -31,13 +32,15 @@ GMs are narrators by default: everyone hears you, and you hear everyone. Two tog
 - **Global Listening** (podcast icon): turn it off to hear only players near your selected tokens, or near the tokens you speak through if none are selected.
 - **Global Speaking** (bullhorn icon): turn it off to be heard only near your selected tokens and the tokens you speak through, for example to voice an NPC.
 
+GMs can also turn either one on or off for any other user from the players list's right-click menu. For example, a user that records the session can hear everyone. The players list marks players who have either turned on, so the table can see who hears everything.
+
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
 - **Speaking cues:** the players list highlights whoever is talking, dimmed if they're out of your earshot. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
 - **Voice bar:** the last row of the players list holds mic, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
 - **Hotkeys:** every voice bar control can be bound under **Configure Controls**. They start unbound, and each button's tooltip shows its hotkey.
-- **Right-click a player** to set their volume, or as a GM to block or allow their audio.
+- **Right-click a player** to set their volume. GMs can also block or allow their audio, and turn their Global Listening or Global Speaking on or off.
 
 ### Reliability fixes
 - **Voice connection drops:** Foundry's voice chat replaces any connection that takes more than about 8 seconds to set up, on both ends at once, so slow connections never finish. The module works around this. Symptoms in the console are `Called in wrong state` and `order of m-lines ... doesn't match`. Someone who reloads reconnects within seconds.
@@ -58,7 +61,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 | Fix Voice Connection Drops | World | On | The connection workaround above; everyone must reload after changing it |
 | Debug Logging | Client | Off | Logs every volume change, and why, to the browser console |
 
-The token's **Proximity** tab holds its speaker list and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
+The token's **Proximity** tab holds its speaker list, listen list, and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
 
 ## Troubleshooting
 Run this in the browser console (F12):
@@ -76,12 +79,14 @@ It prints one row per other user. Each row shows their current volume and why, a
 ## Differences from upstream
 Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 
-### Speaker lists
+### Speaker and listen lists
+- **Tokens have a listen list**: users who hear through the token on top of their own.
+  - Why: upstream only listens from your own tokens, so there's no way for a player to ride along with another after their character dies, or for everyone to hear through one token.
 - **Owners speak through their tokens automatically** ("Owners Speak Through Their Tokens").
   - Why: upstream needs every token's speaker list filled in by hand, even for each player's own character.
   - Owners always count, not only when a token's list is empty. Otherwise a GM adding themselves to a player's token would silently stop the player speaking through it.
   - Default "all players" ownership doesn't count, so shared tokens such as loot piles don't carry everyone's voice.
-- **The speaker list is a checkbox per user**, not a text field of user UUIDs.
+- **The speaker and listen lists are a checkbox per user**, not a text field of user UUIDs.
   - Owners show ticked and locked. The flag keeps upstream's comma-separated format, so the API and existing worlds are unaffected.
 
 ### GM behaviour
@@ -91,8 +96,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - Why: upstream fell back to every token you own. A GM owns them all, including each player's own token, so turning Global Listening off changed nothing.
 - **A GM speaks through their selected tokens** when Global Speaking is off. The selection is shared with players through a user flag, and is cleared when the GM changes scene.
   - Why: selecting a monster to voice it is what GMs naturally do. Upstream only allowed speaking through tokens whose speaker list includes you.
-- **Global Listening is a per-user flag, not a client setting.**
-  - Why: it follows the GM across browsers and devices, and it works the same way as Global Speaking.
+- **Global Listening is a per-user flag, not a client setting**, and a GM can set it, or Global Speaking, for any user.
+  - Why: it follows the user across browsers and devices, and it works the same way as Global Speaking. Setting it for others covers users like a session recorder, and the players list marks them so the table knows.
 - **Toggling either one shows a short on-screen message saying what changed.**
 
 ### Proximity and volume
@@ -152,6 +157,13 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 * `add_user_to_userlist(token: TokenDocument, user_uuid: string): Promise<any>`
 * `remove_user_from_userlist(token: TokenDocument, user_uuid: string): void | Promise<any>`
 
+### Listen lists
+* `get_listenlist(token: TokenDocument): string | undefined`: comma-separated user UUIDs who also listen through the token
+* `set_listenlist(token: TokenDocument, listenlist: string): Promise<any>`
+* `is_user_in_listenlist(token: TokenDocument, user_uuid: string): boolean`
+* `add_user_to_listenlist(token: TokenDocument, user_uuid: string): Promise<any>`
+* `remove_user_from_listenlist(token: TokenDocument, user_uuid: string): void | Promise<any>`
+
 ### Radius
 * `RADIUS_TYPE.PIXELS`, `RADIUS_TYPE.TILES`
 * `get_calculated_token_radius(token: TokenDocument): number`
@@ -172,6 +184,8 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 ### Global Listening and Speaking
 * `is_global_listener(user: User): boolean`
 * `is_global_speaker(user: User): boolean`
+* `set_global_listener(user: User, enabled: boolean): Promise<any>` (a GM can set it for any user)
+* `set_global_speaker(user: User, enabled: boolean): Promise<any>` (a GM can set it for any user)
 * `toggle_global_listener(): Promise<void>` (for the current user)
 * `toggle_global_speaker(): Promise<void>` (for the current user)
 

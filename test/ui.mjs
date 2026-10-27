@@ -326,15 +326,17 @@ block.onClick({}, li("p2"));
 check("Block Audio removes the player's broadcast permission", JSON.stringify(users[2].updates?.at(-1)) === JSON.stringify({ "permissions.BROADCAST_AUDIO": false }));
 
 // --- speaker list checkboxes (GM editing a token owned by Alice)
-function renderTokenConfig(value, disabled) {
+function renderTokenConfig(value, disabled, listenValue = "") {
   const element = new El("form");
   const tab = new El("div"); tab.className = "tab"; tab.dataset.tab = "proximity";
-  const input = new El("input"); input.type = "text"; input.value = value; input.disabled = disabled;
-  input.attrs.name = "flags.proximity-voice-chat.userlist";
-  tab.append(input); element.append(tab);
+  const field = (name, v) => { const i = new El("input"); i.type = "text"; i.value = v; i.disabled = disabled; i.attrs.name = name; tab.append(i); return i; };
+  const input = field("flags.proximity-voice-chat.userlist", value);
+  const listenInput = field("flags.proximity-voice-chat.listenlist", listenValue);
+  element.append(tab);
   const actor = { id: "amiri", ownership: { default: 0, p1: 3 } };
   Hooks.callAll("renderTokenConfig", { document: { baseActor: actor }, actor }, element, {}, {});
-  return { element, input, boxes: element.querySelectorAll("input").filter(i => i.type === "checkbox") };
+  const boxesAfter = i => i.parentElement.children[i.parentElement.children.indexOf(i) + 1].querySelectorAll("input");
+  return { element, input, listenInput, boxes: boxesAfter(input), listenBoxes: boxesAfter(listenInput) };
 }
 {
   const { input, boxes } = renderTokenConfig("User.p2, User.deleted", false);
@@ -351,8 +353,36 @@ function renderTokenConfig(value, disabled) {
   check("unticking Bob removes him", input.value === "User.deleted, User.gm", input.value);
 }
 {
-  const { boxes } = renderTokenConfig("User.p2", true);
-  check("players see the checkboxes read-only", boxes.every(b => b.disabled));
+  const { boxes, listenBoxes } = renderTokenConfig("User.p2", true);
+  check("players see the checkboxes read-only", boxes.every(b => b.disabled) && listenBoxes.every(b => b.disabled));
+}
+{
+  const { listenInput, listenBoxes } = renderTokenConfig("", false, "User.p2");
+  const box = uuid => listenBoxes.find(b => b.value === uuid);
+  check("listen list gets its own checkbox per user, with nothing locked (owners aren't implied)", listenInput.type === "hidden" && listenBoxes.length === 3 && listenBoxes.every(b => !b.disabled));
+  check("listed listener (Bob) is ticked, owner (Alice) is not", box("User.p2").checked && !box("User.p1").checked);
+  box("User.p1").checked = true; await box("User.p1").dispatch("change");
+  check("ticking Alice adds her to the listen list", listenInput.value === "User.p1, User.p2", listenInput.value);
+}
+
+// --- GM sets Global Listening / Speaking for other users (e.g. a recording user)
+{
+  const menu = []; Hooks.callAll("getUserContextOptions", ui.players, menu);
+  const entry = label => menu.find(o => o.label === label);
+  check("GM can turn on Global Listening for a player, not for themselves", entry("proximity-voice-chat.UI.GlobalListenOn").visible(li("p2")) && !entry("proximity-voice-chat.UI.GlobalListenOn").visible(li("gm")));
+  check("'turn off' isn't offered while it's off", !entry("proximity-voice-chat.UI.GlobalListenOff").visible(li("p2")));
+  await entry("proximity-voice-chat.UI.GlobalListenOn").onClick({}, li("p2")); await tick();
+  check("Bob is now a global listener", users[2].flags.global_listener === true);
+  check("a notice names him", notices.at(-1).includes("GlobalListenOnNotice") && notices.at(-1).includes("Bob"));
+  check("'turn off' is offered now", entry("proximity-voice-chat.UI.GlobalListenOff").visible(li("p2")) && !entry("proximity-voice-chat.UI.GlobalListenOn").visible(li("p2")));
+  const markers = row("p2").querySelector(".pvc-global-markers");
+  check("Bob's row shows he hears everyone", !!markers && markers.children.length === 1 && markers.children[0].className.includes("fa-ear-listen"));
+  check("the GM's row has no markers (it's their default)", !row("gm").querySelector(".pvc-global-markers"));
+  await entry("proximity-voice-chat.UI.GlobalListenOff").onClick({}, li("p2")); await tick();
+  check("turning it off removes the marker", users[2].flags.global_listener === false && !row("p2").querySelector(".pvc-global-markers"));
+  const playerMenu = []; becomeUser("p1"); Hooks.callAll("getUserContextOptions", ui.players, playerMenu);
+  check("players don't get these entries", playerMenu.filter(o => o.label.includes("Global")).every(o => !o.visible(li("p2"))));
+  becomeUser("gm");
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");
