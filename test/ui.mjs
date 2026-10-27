@@ -231,6 +231,19 @@ check("'off' still shows the players-list cue", row("p2").classList.contains("pv
 settings.speakingIndicatorOverride = "default";
 now += 1000; await speak("p2", -80);
 
+// speaking cue threshold (client setting, independent of Foundry's voice-activation threshold)
+rtc.client.voice.activityThreshold = -10;// would hide every cue if it were still used
+await speak("p2", -40);
+check("default -45 dB threshold: -40 dB counts as speaking, ignoring Foundry's voice-activation threshold", row("p2").classList.contains("pvc-speaking"));
+now += 1000; await speak("p2", -80);
+settings.speakingThreshold = -30;
+await speak("p2", -40);
+check("raised to -30 dB: -40 dB no longer counts", !row("p2").classList.contains("pvc-speaking"));
+await speak("p2", -25);
+check("raised to -30 dB: -25 dB still counts", row("p2").classList.contains("pvc-speaking"));
+now += 1000; await speak("p2", -80);
+settings.speakingThreshold = -45; rtc.client.voice.activityThreshold = -45;
+
 // own voice only counts while transmitting
 await speak("p1", -20);
 check("your own voice shows on your token while transmitting", indicatorOn(tokens[0])?.pvcStyle === "ring");

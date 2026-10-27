@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "1.4.0";
+export const UI_SCRIPT_VERSION = "1.4.1";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -42,6 +42,15 @@ export function register_voice_ui_settings() {
     type: Boolean,
     default: false,
     onChange: () => _apply_dock_visibility()
+  });
+  game.settings.register(MODULE_ID, "speakingThreshold", {
+    name: "proximity-voice-chat.Settings.SpeakingThreshold.Label",
+    hint: "proximity-voice-chat.Settings.SpeakingThreshold.Hint",
+    scope: "client",
+    config: true,
+    type: Number,
+    range: { min: -70, max: -20, step: 1 },
+    default: -45
   });
   game.settings.register(MODULE_ID, "speakingIndicator", {
     name: "proximity-voice-chat.Settings.SpeakingIndicator.Label",
@@ -115,7 +124,8 @@ function _get_stream(user_id) {
 function _on_level(user_id, db_level) {
   const state = _speakers.get(user_id);
   if (!state) return;
-  const threshold = game.webrtc.settings.client.voice?.activityThreshold ?? -45;
+  // separate from Foundry's voice-activation threshold, so tuning cues doesn't change when anyone transmits
+  const threshold = game.settings.get(MODULE_ID, "speakingThreshold");
   const now = Date.now();
   if (db_level >= threshold) state.last_loud = now;
   let speaking = now - state.last_loud < SPEAKING_HOLD_MS;

@@ -34,7 +34,7 @@ GMs are narrators by default: everyone hears you, and you hear everyone. Two tog
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
-- **Speaking cues:** the players list highlights whoever is talking, dimmed if they're out of your earshot. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes.
+- **Speaking cues:** the players list highlights whoever is talking, dimmed if they're out of your earshot. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
 - **Voice bar:** the last row of the players list holds mic, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
 - **Hotkeys:** every voice bar control can be bound under **Configure Controls**. They start unbound, and each button's tooltip shows its hotkey.
 - **Right-click a player** to set their volume, or as a GM to block or allow their audio.
@@ -54,6 +54,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 | Show Camera Dock Anyway | Client | Off | Brings the dock back on your device, e.g. to see video |
 | Speaking Cue on Tokens | World | Ring | The table's default cue: ring, icon, badge, or off |
 | My Speaking Cue on Tokens | Client | GM's default | Your own choice of cue |
+| Speaking Cue Threshold (dB) | Client | −45 | How loud a voice must be to show a cue; raise it if background noise lights people up |
 | Fix Voice Connection Drops | World | On | The connection workaround above; everyone must reload after changing it |
 | Debug Logging | Client | Off | Logs every volume change, and why, to the browser console |
 
@@ -129,8 +130,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 ### Interface
 - **The camera dock is hidden by default**, with speaking cues and a voice bar in the players list.
   - Why: for audio-only proximity play, the dock takes space and shows nothing useful. It's moved off-screen rather than removed, because voice audio plays through its video elements.
-- **Speaking is detected from the audio you receive.**
-  - Why: Foundry's own "speaking" signal stays on permanently in always-on voice mode.
+- **Speaking is detected from the audio you receive**, with its own threshold setting.
+  - Why: Foundry's own "speaking" signal stays on permanently in always-on voice mode. A separate threshold means tuning cues doesn't change when anyone transmits in voice-activated mode.
 - **New hotkeys, right-click volume and audio blocking, and `diagnose()`** with a Debug Logging setting.
 - **A stale-script check:** the scripts know their own version and show an error that stays on screen when a browser runs an old cached copy.
 

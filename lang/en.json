@@ -48,5 +48,7 @@
   "proximity-voice-chat.UI.VolumeTitle": "Voice volume: {name}",
   "proximity-voice-chat.Token.Owner": "owner",
   "proximity-voice-chat.Settings.OwnersSpeak.Label": "Owners Speak Through Their Tokens",
-  "proximity-voice-chat.Settings.OwnersSpeak.Hint": "Players speak through tokens of their assigned character, and of actors they've been given Owner permission on, without being added to the token's speaker list. Default \"all players\" ownership doesn't count."
+  "proximity-voice-chat.Settings.OwnersSpeak.Hint": "Players speak through tokens of their assigned character, and of actors they've been given Owner permission on, without being added to the token's speaker list. Default \"all players\" ownership doesn't count.",
+  "proximity-voice-chat.Settings.SpeakingThreshold.Label": "Speaking Cue Threshold (dB)",
+  "proximity-voice-chat.Settings.SpeakingThreshold.Hint": "How loud someone's voice must be, as you receive it, to show a speaking cue. Lower is more sensitive; raise it if background noise lights people up. Doesn't affect when anyone transmits."
 }
