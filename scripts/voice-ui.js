@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "1.3.1";
+export const UI_SCRIPT_VERSION = "1.3.2";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",

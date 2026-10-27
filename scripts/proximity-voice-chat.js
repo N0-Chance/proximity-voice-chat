@@ -6,7 +6,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.3.1";
+const SCRIPT_VERSION = "1.3.2";
 
 /**
  * The different types with which a radius can be measured
@@ -421,14 +421,18 @@ function _is_voice_active() {
 }
 
 /**
- * The tokens this client listens through: the controlled tokens, or if none are controlled, every owned token
- * for players. A GM owns every token, so with nothing selected a GM listens only through tokens they speak through.
+ * The tokens this client listens through: the controlled tokens, or if none are controlled, every owned token and
+ * every token they speak through for players. A GM owns every token, so with nothing selected a GM listens only
+ * through tokens they speak through. Without a canvas there is nothing to listen through.
  * @returns {Array<foundry.canvas.placeables.Token>}
  */
 function _get_listener_tokens() {
+  if (!globalThis.canvas?.ready) return [];
   if (canvas.tokens.controlled.length > 0) return canvas.tokens.controlled;
-  if (game.user.isGM) return canvas.tokens.placeables.filter(token => is_user_in_userlist(token.document, game.user.uuid));
-  return canvas.tokens.ownedTokens;
+  const speaking_through = canvas.tokens.placeables.filter(token => is_user_in_userlist(token.document, game.user.uuid));
+  if (game.user.isGM) return speaking_through;
+  // a player also listens through tokens they speak through but don't own, e.g. a companion NPC
+  return [...new Set([...canvas.tokens.ownedTokens, ...speaking_through])];
 }
 
 /**
@@ -448,7 +452,9 @@ function _get_listener_positions() {
 function _calculate_user_volume(other_user, listeners) {
   // Foundry's own deafen doesn't work in 14.369 (its camera template reads "mutaAll"), so apply it here
   if (game.webrtc?.settings?.client?.muteAll) return { volume: 0, reason: "you have deafened yourself" };
-  if (canvas.scene?.getFlag(MODULE_ID, "disabled")) return { volume: 1, reason: "scene proximity disabled" };
+  // without a canvas (e.g. "Disable Game Canvas"), fall back to the viewed scene so only global voices get through
+  const scene = globalThis.canvas?.ready ? canvas.scene : game.scenes?.viewed;
+  if (scene?.getFlag(MODULE_ID, "disabled")) return { volume: 1, reason: "scene proximity disabled" };
   if (is_global_listener(game.user)) return { volume: 1, reason: "you are a global listener" };
   if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
   let volume = 0;
@@ -466,6 +472,7 @@ function _calculate_user_volume(other_user, listeners) {
     }
     if (volume >= 1) break;
   }
+  if (!globalThis.canvas?.ready) return { volume: 0, reason: "no canvas, so only global speakers are heard" };
   if (speaking_tokens === 0) return { volume: 0, reason: "they speak through no token in this scene" };
   if (listeners.length === 0) return { volume: 0, reason: game.user.isGM ? "no token selected" : "you have no listening token" };
   if (volume === 0) return { volume: 0, reason: "out of range of their tokens" };
@@ -490,7 +497,9 @@ function _get_audio_element(user_id) {
 const _last_volumes = new Map();
 
 function _update_volumes() {
-  if (!globalThis.canvas?.ready || !_is_voice_active() || !globalThis.ui?.webrtc) return;
+  // runs without a canvas too: otherwise "Disable Game Canvas" would leave everyone at full volume.
+  // The timer can fire while the page is still loading, before Foundry has set game.user.
+  if (!game.user || !_is_voice_active() || !globalThis.ui?.webrtc) return;
   const listeners = _get_listener_positions();
   const debug = game.settings.get(MODULE_ID, "debug");
   for (const other_user of game.users) {
@@ -537,6 +546,7 @@ setInterval(() => {
   // token movement isn't animated in background tabs, so sources are moved to the tokens' destinations instead
   if (globalThis.document.hidden && globalThis.canvas?.ready) _rebuild_all_sources();
   else _schedule_volume_update();
+  _request_calls(game.webrtc?.client);
 }, 1000);
 
 globalThis.document.addEventListener("visibilitychange", () => {
@@ -544,6 +554,8 @@ globalThis.document.addEventListener("visibilitychange", () => {
 });
 
 Hooks.on("updateToken", (document, changed, _options, _userId) => {
+  // every client hears about tokens on every scene; only the one being viewed has sources
+  if (document.parent !== globalThis.canvas?.scene) return;
   const flags = changed.flags?.[MODULE_ID];
   if (!flags) return;
   if (["userlist", "radius", "radius_type", "-=userlist", "-=radius", "-=radius_type"].some(key => key in flags)) {
@@ -584,8 +596,9 @@ let _selection_timeout = null;
 function _share_gm_selection() {
   clearTimeout(_selection_timeout);
   _selection_timeout = setTimeout(() => {
-    if (!game.user.isGM || !globalThis.canvas?.ready) return;
-    const selected = canvas.tokens.controlled.map(token => token.document.uuid).sort();
+    if (!game.user.isGM) return;
+    // no canvas (mid scene change, or disabled) means nothing is selected; clear it so players stop hearing the GM there
+    const selected = globalThis.canvas?.ready ? canvas.tokens.controlled.map(token => token.document.uuid).sort() : [];
     const current = game.user.getFlag(MODULE_ID, "selected_tokens") ?? [];
     if (selected.length === current.length && selected.every((uuid, i) => uuid === current[i])) return;
     game.user.setFlag(MODULE_ID, "selected_tokens", selected);
@@ -630,9 +643,12 @@ Hooks.once("ready", () => {
 
 Hooks.on("canvasTearDown", (_canvas) => {
   _token_proximity_data.clear();
+  if (game.user.isGM) _share_gm_selection();
 });
 
 Hooks.on("canvasReady", (_canvas) => {
+  // also clears a selection left over from a previous session or scene
+  if (game.user.isGM) _share_gm_selection();
   _rebuild_all_sources();
 });
 
@@ -662,6 +678,39 @@ Hooks.on("rtcSettingsChanged", (_settings, _changed) => {
 const _PEER_SETUP_TIMEOUT_MS = 30000;
 const _PEER_STARTED = Symbol("proximity-voice-chat.started");
 const _PEER_REMOTE_FINGERPRINT = Symbol("proximity-voice-chat.remoteFingerprint");
+/** Set on a SimplePeerAVClient once connect() has finished, i.e. its socket listeners are up and it can take calls */
+const _CLIENT_READY = Symbol("proximity-voice-chat.clientReady");
+const _LAST_CALL_REQUEST = Symbol("proximity-voice-chat.lastCallRequest");
+const _CALL_REQUEST_INTERVAL_MS = 4000;
+/** An offer we sent this recently may simply have crossed the other side's call request in flight */
+const _CALL_IN_FLIGHT_MS = 5000;
+const _SOCKET = "module." + MODULE_ID;
+
+/** Set by _patch_simplepeer: answers another user's request that we call them */
+let _on_call_request = null;
+
+/**
+ * Asks each user who is meant to call us (the lower ID of each pair) to do so now, if we have no connection to them.
+ * Foundry only retries connections every 8 seconds, so without this someone who reloads waits that long per person.
+ * @param {foundry.av.clients.SimplePeerAVClient} client
+ */
+function _request_calls(client) {
+  if (!client?.[_CLIENT_READY] || !game.socket) return;
+  const last = client[_LAST_CALL_REQUEST] ??= {};
+  for (const user of game.users) {
+    if (!user.active || user.isSelf || game.userId < user.id) continue;
+    if (client.peers.has(user.id)) continue;
+    if (Date.now() - (last[user.id] ?? 0) < _CALL_REQUEST_INTERVAL_MS) continue;
+    last[user.id] = Date.now();
+    game.socket.emit(_SOCKET, { action: "call-me", from: game.userId, to: user.id });
+  }
+}
+
+Hooks.once("ready", () => {
+  game.socket.on(_SOCKET, (message) => {
+    if (message?.action === "call-me" && message.to === game.userId) _on_call_request?.(message.from);
+  });
+});
 
 /**
  * Gets the DTLS certificate fingerprint from an SDP. Every new RTCPeerConnection has its own certificate,
@@ -746,6 +795,31 @@ function _patch_simplepeer() {
     // only one side of each pair makes the call, so the two ends never send offers at the same time
     if (game.userId > userId) return null;
     return original_initialize_peer_stream.call(this, userId);
+  };
+
+  const original_connect = proto.connect;
+  const original_disconnect = proto.disconnect;
+  proto.connect = async function (...args) {
+    const result = await original_connect.apply(this, args);
+    this[_CLIENT_READY] = true;
+    _request_calls(this);
+    return result;
+  };
+  proto.disconnect = async function (...args) {
+    this[_CLIENT_READY] = false;
+    return original_disconnect.apply(this, args);
+  };
+
+  _on_call_request = (from) => {
+    const client = game.webrtc?.client;
+    if (!(client instanceof client_class) || !client[_CLIENT_READY]) return;
+    if (game.userId > from) return;// they are the caller for this pair
+    const peer = client.peers.get(from);
+    if (peer && !peer.destroyed && !_is_peer_up(peer) && Date.now() - (peer[_PEER_STARTED] ?? 0) < _CALL_IN_FLIGHT_MS) return;
+    // they have no connection to us, so whatever we hold for them is dead
+    if (game.settings.get(MODULE_ID, "debug")) console.log(MODULE_ID + " | " + game.users.get(from)?.name + " asked to be called");
+    if (peer) drop_peer.call(client, from);
+    original_initialize_peer_stream.call(client, from);
   };
 
   proto.receiveSignal = function (userId, data) {
@@ -900,7 +974,7 @@ export function diagnose() {
     uiScript: UI_SCRIPT_VERSION,
     canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
-    sceneDisabled: !!globalThis.canvas?.scene?.getFlag(MODULE_ID, "disabled"),
+    sceneDisabled: !!(globalThis.canvas?.ready ? canvas.scene : game.scenes?.viewed)?.getFlag(MODULE_ID, "disabled"),
     youAreGlobalListener: is_global_listener(game.user),
     youAreGlobalSpeaker: is_global_speaker(game.user),
     listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name).join(", ") || "nothing" : "canvas not ready",
@@ -914,7 +988,7 @@ export function diagnose() {
     const stream = element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
-    const { volume, reason } = globalThis.canvas?.ready ? _calculate_user_volume(user, listeners) : { volume: NaN, reason: "canvas not ready" };
+    const { volume, reason } = _calculate_user_volume(user, listeners);
     // Foundry's getConnectedUsers() lists anyone with a connection object, even one that never finished,
     // so ask the browser's own connection state instead
     const peer = game.webrtc?.client?.peers?.get(user.id);

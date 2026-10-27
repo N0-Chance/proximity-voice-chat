@@ -87,6 +87,12 @@ class SimplePeerAVClient {
     this.remoteStreams = new Map();
     this.master = { render() {}, settings: { handleUserActivity() {}, getUser: () => ({}) } };
   }
+  // Foundry's connect() runs one connection pass immediately, then polls every 8 seconds
+  async connect() {
+    for (const other of ["a", "b"]) if (other !== this.id) await this.initializePeerStream(other);
+    return true;
+  }
+  async disconnect() { return true; }
   async initializePeerStream(userId) {
     const peer = this.peers.get(userId);
     if (peer?.connected || peer?._connecting) return peer;
@@ -127,27 +133,41 @@ class SimplePeerAVClient {
 const hooks = {};
 globalThis.Hooks = { on: (n, f) => (hooks[n] ??= []).push(f), once: (n, f) => (hooks[n] ??= []).push(f), callAll: (n, ...a) => (hooks[n] ?? []).forEach(f => f(...a)) };
 const el = () => ({ classList: { add() {}, toggle() {} }, setAttribute() {}, getAttribute() {}, appendChild() {}, append() {} });
-globalThis.document = { hidden: false, createElement: el, addEventListener() {}, querySelector: () => null };
+globalThis.document = { hidden: false, createElement: el, addEventListener() {}, querySelector: () => null, body: { classList: { toggle() {} } } };
+globalThis.ui = { notifications: { error() {}, info() {} } };
 const sheet = () => ({ TABS: { sheet: { tabs: [] } }, PARTS: { footer: {} } });
 const settings = {};
 globalThis.foundry = {
   applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() } },
   av: { clients: { SimplePeerAVClient }, AVSettings: { AV_MODES: { AUDIO: 1, AUDIO_VIDEO: 3 } } },
+  canvas: { loadTexture: async () => ({}) },
 };
 globalThis.game = {
   userId: null,
   keybindings: { register() {}, get: () => [] },
-  users: { get: id => ({ name: id }) },
+  i18n: { localize: s => s, format: s => s },
+  users: Object.assign(["a", "b"].map(id => ({ id, name: id, active: true, get isSelf() { return game.userId === id; } })),
+    { get: id => ({ name: id }) }),
+  socket: { on: (name, fn) => socketHandlers.push(fn), emit: (name, data) => moduleQueue.push({ from: game.userId, data }) },
   modules: new Map([["proximity-voice-chat", {}]]),
   settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k] },
 };
-globalThis.setInterval = () => 0;
+const intervals = [];
+globalThis.setInterval = fn => (intervals.push(fn), 0);
+const socketHandlers = [];
+let moduleQueue = [];
 
-const as = (client, fn) => { game.userId = client.id; return fn(); };
+const as = (client, fn) => { game.userId = client.id; game.webrtc = { client }; return fn(); };
 function deliver(clients) {
-  for (let guard = 0; queue.length && guard < 1000; guard++) {
-    const { from, to, data } = queue.shift();
-    as(clients[to], () => clients[to].receiveSignal(from, data));
+  for (let guard = 0; (queue.length || moduleQueue.length) && guard < 1000; guard++) {
+    if (queue.length) {
+      const { from, to, data } = queue.shift();
+      as(clients[to], () => clients[to].receiveSignal(from, data));
+    } else {
+      // module socket messages go to every other client
+      const { from, data } = moduleQueue.shift();
+      for (const id of Object.keys(clients)) if (id !== from) as(clients[id], () => socketHandlers.forEach(fn => fn(data)));
+    }
   }
 }
 
@@ -155,7 +175,7 @@ function deliver(clients) {
  * @returns {{connectedAt: number | null, stable: boolean, errors: string[]}}
  */
 async function simulate({ connect_ms, duration_ms = 180000, offsets = { a: 0, b: 0 }, reload = null }) {
-  now = 0; errors = []; all_peers = []; queue = [];
+  now = 0; errors = []; all_peers = []; queue = []; moduleQueue = [];
   const clients = { a: new SimplePeerAVClient("a"), b: new SimplePeerAVClient("b") };
   let connectedAt = null;
   let reconnectedAt = null;
@@ -167,8 +187,11 @@ async function simulate({ connect_ms, duration_ms = 180000, offsets = { a: 0, b:
     }
     for (const id of ["a", "b"]) {
       const other = id === "a" ? "b" : "a";
-      if ((now - offsets[id]) % POLL_MS === 0 && now >= offsets[id]) await as(clients[id], () => clients[id].initializePeerStream(other));
+      const reloaded = reload && id === reload.who && now === reload.at + 500;
+      if (now === offsets[id] || reloaded) await as(clients[id], () => clients[id].connect());
+      else if ((now - offsets[id]) % POLL_MS === 0 && now > offsets[id]) await as(clients[id], () => clients[id].initializePeerStream(other));
     }
+    if (now % 1000 === 0) for (const id of ["a", "b"]) as(clients[id], () => intervals.forEach(fn => fn()));
     await Promise.resolve();
     for (const peer of [...all_peers]) peer.start();
     deliver(clients);
@@ -205,13 +228,15 @@ for (const s of scenarios) { const r = await simulate(s); baseline.push(r); cons
 
 await import(process.argv[2] ?? new URL("../scripts/proximity-voice-chat.js", import.meta.url).href);
 Hooks.callAll("init");
+Hooks.callAll("ready");
 await Promise.resolve();
 
 console.log("--- with proximity-voice-chat workaround");
 let failures = 0;
 for (const s of scenarios) {
   const r = await simulate(s);
-  const ok = r.final_up && r.connectedAt > 0 && (!s.reload || r.reconnectedAt !== null);
+  // with the call-me handshake, a reload should reconnect within a few seconds rather than a poll cycle or more
+  const ok = r.final_up && r.connectedAt > 0 && (!s.reload || (r.reconnectedAt !== null && r.reconnectedAt - s.reload.at <= 5000));
   if (!ok) failures++;
   console.log((ok ? "  ok   " : "  FAIL ") + s.name + ": " + fmt(r));
 }

@@ -16,10 +16,10 @@ Updates arrive through Foundry's own **Check for Updates**. Requires Foundry v14
 Each token has a **speaker list**: the users whose voice comes from that token. Edit it in the token's **Proximity** tab (comma-separated user UUIDs, e.g. `User.TyKhb00c4SFsBeGc`), or as a GM use the podcast button in the token HUD to add or remove yourself.
 
 - **Speaking:** your voice comes from every token whose speaker list includes you.
-- **Listening:** you hear from your selected tokens, or from all tokens you own if none are selected.
+- **Listening:** you hear from your selected tokens. If none are selected, you hear from every token you own or speak through.
 - **Volume** fades with distance out to the token's proximity radius, and walls block it.
 
-The radius is set per token, per scene, or as a world default, in pixels or grid tiles. A scene can also turn proximity off entirely, so everyone hears everyone.
+The radius is set per token, per scene, or as a world default, in pixels or grid tiles. A scene can also turn proximity off entirely, so everyone hears everyone. Without a canvas (e.g. "Disable Game Canvas"), you hear only global speakers.
 
 ## Features
 ### GM controls
@@ -37,7 +37,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 - **Right-click a player** to set their volume, or as a GM to block or allow their audio.
 
 ### Reliability fixes
-- **Voice connection drops:** Foundry's voice chat replaces any connection that takes more than about 8 seconds to set up, on both ends at once, so slow connections never finish. The module works around this. Symptoms in the console are `Called in wrong state` and `order of m-lines ... doesn't match`.
+- **Voice connection drops:** Foundry's voice chat replaces any connection that takes more than about 8 seconds to set up, on both ends at once, so slow connections never finish. The module works around this. Symptoms in the console are `Called in wrong state` and `order of m-lines ... doesn't match`. Someone who reloads reconnects within seconds.
 - **Deafen:** Foundry 14.369's own deafen button does nothing (a typo in its camera template). The module applies deafen itself.
 - **Fixes to upstream's proximity logic:** see [Differences from upstream](#differences-from-upstream).
 
@@ -76,7 +76,7 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - Why: upstream only lets you be heard through tokens whose speaker list includes you. A GM is on none, so players heard nothing until the GM found the Global Speaking button.
 - **Global Listening with nothing selected now means listening only through tokens you speak through.**
   - Why: upstream fell back to every token you own. A GM owns them all, including each player's own token, so turning Global Listening off changed nothing.
-- **A GM speaks through their selected tokens** when Global Speaking is off. The selection is shared with players through a user flag.
+- **A GM speaks through their selected tokens** when Global Speaking is off. The selection is shared with players through a user flag, and is cleared when the GM changes scene.
   - Why: selecting a monster to voice it is what GMs naturally do. Upstream only allowed speaking through tokens whose speaker list includes you.
 - **Global Listening is a per-user flag, not a client setting.**
   - Why: it follows the GM across browsers and devices, and it works the same way as Global Speaking.
@@ -91,6 +91,12 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - Why: Foundry resets each camera's volume whenever it redraws a camera tile or a stream connects, and there's no hook for the latter. Upstream re-applied after fixed 100–500 ms delays, which connections often outlast.
 - **Muted users are no longer forced to volume 0.**
   - Why: Foundry already silences them. Setting the volume to 0 could leave Chrome's audio element paused after they unmuted.
+- **Players also listen through tokens they speak through**, not only tokens they own.
+  - Why: a player voicing a companion NPC was heard near it but couldn't hear anyone there.
+- **Only tokens on the scene you're viewing are voice sources.**
+  - Why: upstream rebuilt a source whenever any token's settings changed, including tokens on other scenes. Every scene's default level has the same ID, so such a token acted as a phantom voice at its coordinates on your map.
+- **Without a canvas, only global speakers are heard.**
+  - Why: upstream stopped managing volumes entirely, so a player using "Disable Game Canvas" heard everyone at full volume.
 - **Walls and doors update line of sight** when created, changed, or deleted.
   - Why: upstream's wall hook re-initialized each sound source with no data, which doesn't rebuild its shape.
 - **Sound sources carry the token's scene Level, and use Foundry's own `getSoundOrigin`/`getListenerPosition`.**
@@ -104,6 +110,7 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 - **Workaround for Foundry's connection churn** ("Fix Voice Connection Drops").
   - The problem: Foundry checks every 8 seconds and replaces any connection that hasn't fully finished setting up, on both ends at once, without closing the old one. A leftover connection that later fails then tears down its replacement.
   - The module's fix: only one side of each pair calls, a connection gets 30 seconds to finish, events from replaced connections are ignored, and a fresh offer from a reloaded browser replaces the old connection immediately.
+  - A browser that loads or reloads asks the other side to call it over the module's socket. It reconnects in seconds, not after the next 8-second poll.
 - **Deafen works.**
   - Why: Foundry 14.369's camera template reads `mutaAll` instead of `muteAll`, so its deafen button does nothing.
 

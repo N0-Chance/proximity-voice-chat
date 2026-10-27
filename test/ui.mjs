@@ -128,6 +128,7 @@ globalThis.game = {
   modules: new Map([["proximity-voice-chat", { version: "1.2.3", active: true }]]),
   settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k], set: async (m, k, v) => { settings[k] = v; } },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
+  socket: { on() {}, emit() {} },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: rtc, broadcasting: true, config: { render: () => configOpened++ },
     client: { getMediaStreamForUser: id => streams[id] ?? null, getLevelsStreamForUser: id => streams[id] ?? null } },

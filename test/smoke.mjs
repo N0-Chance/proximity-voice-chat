@@ -42,6 +42,7 @@ globalThis.game = {
   modules: new Map([["proximity-voice-chat", { version: "test", active: true }]]),
   settings: { register: (m, k, c) => settings[k] = c.default, get: (m, k) => settings[k] },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
+  socket: { on() {}, emit() {} },
   keybindings: { register() {}, get: () => [] },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: { world: { mode: 3 }, client: {}, getUser: id => ({ volume: 0.64, muted: false, canBroadcastAudio: true }) }, client: { getConnectedUsers: () => users.map(u => u.id) } },
@@ -133,6 +134,39 @@ document.hidden = true; tokens[1].document.x = 0; tokens[1].document._source.x =
 Hooks.callAll("canvasReady", canvas); await tick();
 expect("hidden tab uses Bob's real destination", media.p2.volume, 0);
 document.hidden = false;
+const check = (label, ok, detail = "") => { if (!ok) fails++; console.log((ok ? "ok  " : "FAIL") + " " + label + (detail ? "  [" + detail + "]" : "")); };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+// Bob is far from Alice's own token
+tokens[1].document.x = 3000; tokens[1].document._source.x = 3000; Hooks.callAll("canvasReady", canvas); await tick();
+expect("Alice can't hear Bob from her own token", media.p2.volume, 0);
+// fix 4: Alice speaks through a companion token (not hers) parked next to Bob, and listens through it too
+tokens[2].document.x = 3000; tokens[2].document._source.x = 3000; setUserlist(tokens[2], "User.p1"); await tick();
+expect("Alice hears Bob through a non-owned token she speaks through", media.p2.volume, 0.64);
+setUserlist(tokens[2], ""); await tick();
+// fix 1: a token on another scene must not become a voice source here
+const otherScene = { tokens: [], grid: { size: 100 }, flags: {}, getFlag() {} };
+const elsewhere = mkToken("elsewhere", 0, 0, "User.p2", "p2").document; elsewhere.parent = otherScene;
+Hooks.callAll("updateToken", elsewhere, { flags: { "proximity-voice-chat": { userlist: "User.p2" } } }); await tick();
+check("token on another scene isn't a voice source", !game.modules.get("proximity-voice-chat").api.get_speaking_token_uuids(users[2]).includes(elsewhere.uuid));
+expect("Alice still can't hear Bob (no phantom source next to her)", media.p2.volume, 0);
+// fix 2: no canvas means only global speakers are heard, not everyone at full volume
+users[0].flags.global_speaker = undefined;
+canvas.ready = false; Hooks.callAll("canvasTearDown", canvas);
+intervals.forEach(fn => fn()); await tick();
+expect("no canvas: global-speaking GM still heard", media.gm.volume, 0.64);
+expect("no canvas: Bob silent instead of full volume", media.p2.volume, 0);
+canvas.ready = true; Hooks.callAll("canvasReady", canvas); await tick();
+// fix 3: the GM's shared selection is cleared when their canvas goes away, and on load
+becomeUser("gm"); await wait(300);
+canvas.tokens.controlled = [{ document: tokens[2].document, isOwner: true }]; Hooks.callAll("controlToken"); await wait(300);
+check("GM selection shared", JSON.stringify(users[0].flags.selected_tokens) === JSON.stringify([tokens[2].document.uuid]));
+canvas.ready = false; Hooks.callAll("canvasTearDown", canvas); await wait(300);
+check("GM selection cleared on scene teardown", JSON.stringify(users[0].flags.selected_tokens) === "[]", JSON.stringify(users[0].flags.selected_tokens));
+canvas.ready = true;
+users[0].flags.selected_tokens = [tokens[2].document.uuid];// left over from a previous session
+becomeUser("gm"); await wait(300);
+check("leftover GM selection cleared when the canvas loads", JSON.stringify(users[0].flags.selected_tokens) === "[]", JSON.stringify(users[0].flags.selected_tokens));
+becomeUser("p1"); await tick();
 // userlist removed via flag update
 tokens[1].document.flags["proximity-voice-chat"].userlist = ""; Hooks.callAll("updateToken", tokens[1].document, { flags: { "proximity-voice-chat": { userlist: "" } } }); await tick();
 const rows = game.modules.get("proximity-voice-chat").api.diagnose();
