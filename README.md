@@ -34,11 +34,27 @@ GMs are narrators by default: everyone hears you, and you hear everyone. Two tog
 
 GMs can also turn either one on or off for any other user from the players list's right-click menu. For example, a user that records the session can hear everyone. The players list marks players who have either turned on, so the table can see who hears everything.
 
+### Voice modes
+Everyone can **whisper** or **yell**. This changes how far their voice carries:
+
+- **Whisper** reaches 25% of your normal radius, so only those right next to you hear.
+- **Yell** reaches 200%.
+
+The GM sets both percentages, and walls still block sound. Because volume fades with distance, a yell also sounds louder further away.
+
+- **Switching modes:** click the mode button on the voice bar to cycle Normal → Whisper → Yell, and right-click it to return to Normal. You can also bind the **Whisper** and **Yell** hotkeys: tap one to switch and stay (tap again for Normal), or hold it while talking to switch back when you let go.
+- **What you see:**
+  - The mode button turns blue for Whisper and orange for Yell, and your own row in the players list keeps showing your mode.
+  - For about 2 seconds after switching, your token outlines where your voice now reaches, walls included.
+- **What others see while you talk:** a dotted ring for Whisper and a thick, rippling ring for Yell, or the matching icons in the other cue styles. A whisper someone can't hear shows them no cue at all, so private conversations stay private.
+- **Global Speaking overrides your mode:** a narrating GM is heard by everyone. Global Listening still hears whispers, which suits a session recorder.
+- **Modes are temporary:** they aren't saved, and everyone starts each session on Normal.
+
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
 - **Speaking cues:** the players list highlights whoever is talking, dimmed if they're out of your earshot. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
-- **Voice bar:** the last row of the players list holds mic, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
+- **Voice bar:** the last row of the players list holds mic, voice mode, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
 - **Hotkeys:** every voice bar control can be bound under **Configure Controls**. They start unbound, and each button's tooltip shows its hotkey.
 - **Right-click a player** to set their volume. GMs can also block or allow their audio, and turn their Global Listening or Global Speaking on or off.
 
@@ -50,6 +66,8 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 ## Settings
 | Setting | Scope | Default | What it does |
 |---|---|---|---|
+| Whisper Range (% of normal) | World | 25 | How far a whisper carries, as a percentage of the speaker's radius |
+| Yell Range (% of normal) | World | 200 | How far a yell carries, as a percentage of the speaker's radius |
 | Owners Speak Through Their Tokens | World | On | Players speak through tokens they own without being on the speaker list |
 | Default Proximity Radius | World | 1200 | How far voices carry, unless a token or scene sets its own radius |
 | Radius Type | World | Pixels | Whether the default radius is in pixels or grid tiles |
@@ -124,6 +142,12 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - The token HUD button is null-guarded.
   - A movement call that passed a position as a speaker list is fixed.
 
+### Voice modes
+- **Whisper and Yell, which upstream doesn't have.**
+  - They scale the radius rather than the volume: a nearby voice is already at full volume, and nothing is heard past the radius, so only range changes who can hear.
+- **Modes travel over the module's socket, not on the user record.**
+  - Why: switching often (hold-to-whisper) would otherwise write to the database each time, and starting every session on Normal means nobody is stuck whispering after a reload.
+
 ### Voice connections
 - **Workaround for Foundry's connection churn** ("Fix Voice Connection Drops").
   - The problem: Foundry checks every 8 seconds and replaces any connection that hasn't fully finished setting up, on both ends at once, without closing the old one. A leftover connection that later fails then tears down its replacement.
@@ -188,6 +212,13 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 * `set_global_speaker(user: User, enabled: boolean): Promise<any>` (a GM can set it for any user)
 * `toggle_global_listener(): Promise<void>` (for the current user)
 * `toggle_global_speaker(): Promise<void>` (for the current user)
+
+### Voice modes
+* `VOICE_MODES.NORMAL`, `VOICE_MODES.WHISPER`, `VOICE_MODES.YELL`
+* `get_voice_mode(user: User | string): string`
+* `set_voice_mode(mode: string): void`: sets your own mode and tells everyone
+* `get_voice_reach(user: User): PIXI.Polygon[]`: the areas that user's voice currently reaches, one per token they speak through
+* Hook `proximityVoiceModeChanged(user: User, mode: string)` fires on every client when anyone's mode changes
 
 ### Voice state
 * `get_user_volume(user_id: string): number`: how loud that user currently is for you, from 0 to 1

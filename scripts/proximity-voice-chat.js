@@ -6,7 +6,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.5.0";
+const SCRIPT_VERSION = "1.6.0";
 
 /**
  * The different types with which a radius can be measured
@@ -338,6 +338,26 @@ Hooks.on("init", async () => {
       [RADIUS_TYPE.TILES]: "proximity-voice-chat.RadiusType.Tiles"
     }
   });
+  await game.settings.register(MODULE_ID, "whisperRange", {
+    name: "proximity-voice-chat.Settings.WhisperRange.Label",
+    hint: "proximity-voice-chat.Settings.WhisperRange.Hint",
+    scope: "world",
+    config: true,
+    type: Number,
+    range: { min: 5, max: 100, step: 5 },
+    default: 25,
+    onChange: () => _rebuild_all_sources()
+  });
+  await game.settings.register(MODULE_ID, "yellRange", {
+    name: "proximity-voice-chat.Settings.YellRange.Label",
+    hint: "proximity-voice-chat.Settings.YellRange.Hint",
+    scope: "world",
+    config: true,
+    type: Number,
+    range: { min: 100, max: 500, step: 10 },
+    default: 200,
+    onChange: () => _rebuild_all_sources()
+  });
   await game.settings.register(MODULE_ID, "ownersSpeak", {
     name: "proximity-voice-chat.Settings.OwnersSpeak.Label",
     hint: "proximity-voice-chat.Settings.OwnersSpeak.Hint",
@@ -388,6 +408,10 @@ Hooks.on("init", async () => {
     set_scene_disabled,
     is_global_listener,
     is_global_speaker,
+    VOICE_MODES,
+    get_voice_mode,
+    set_voice_mode,
+    get_voice_reach,
     set_global_listener,
     set_global_speaker,
     toggle_global_listener,
@@ -407,7 +431,84 @@ Hooks.on("init", async () => {
 
 
 /**
- * @type {Map<String, {soundsource: foundry.canvas.sources.PointSoundSource, userlist: Array<String>}>}
+ * How far a user's voice carries: Normal, Whisper (a fraction of the radius) or Yell (a multiple of it)
+ * @enum {string}
+ */
+export const VOICE_MODES = {
+  NORMAL: "normal",
+  WHISPER: "whisper",
+  YELL: "yell"
+};
+
+/**
+ * Each user's current voice mode, by user ID. Deliberately not stored on the user: it changes often (hold-to-whisper)
+ * and should start each session on Normal, so it travels over the module socket instead. Absent means Normal.
+ * @type {Map<string, string>}
+ */
+const _voice_modes = new Map();
+
+/**
+ * @param {foundry.documents.User | string} user a user or user ID
+ * @returns {string} a value of VOICE_MODES
+ */
+export function get_voice_mode(user) {
+  return _voice_modes.get(typeof user === "string" ? user : user?.id) ?? VOICE_MODES.NORMAL;
+}
+
+/**
+ * The radius multiplier for a voice mode, from the GM's world settings
+ * @param {string} mode a value of VOICE_MODES
+ * @returns {number}
+ */
+function _mode_range(mode) {
+  if (mode === VOICE_MODES.WHISPER) return game.settings.get(MODULE_ID, "whisperRange") / 100;
+  if (mode === VOICE_MODES.YELL) return game.settings.get(MODULE_ID, "yellRange") / 100;
+  return 1;
+}
+
+/**
+ * Records a user's voice mode and rebuilds the sound sources, since each mode carries its own radius
+ * @param {string} user_id
+ * @param {string} mode
+ */
+function _apply_voice_mode(user_id, mode) {
+  if (!Object.values(VOICE_MODES).includes(mode)) return;
+  if (get_voice_mode(user_id) === mode) return;
+  if (mode === VOICE_MODES.NORMAL) _voice_modes.delete(user_id);
+  else _voice_modes.set(user_id, mode);
+  // mid scene change there's nothing to rebuild; canvasReady rebuilds with the new mode
+  if (globalThis.canvas?.ready) _rebuild_all_sources();
+  Hooks.callAll("proximityVoiceModeChanged", game.users.get(user_id), mode);
+}
+
+/**
+ * Sets your own voice mode and tells everyone else
+ * @param {string} mode a value of VOICE_MODES
+ */
+export function set_voice_mode(mode) {
+  if (!Object.values(VOICE_MODES).includes(mode) || get_voice_mode(game.user) === mode) return;
+  _apply_voice_mode(game.user.id, mode);
+  game.socket?.emit(_SOCKET, { action: "voice-mode", from: game.user.id, mode });
+}
+
+/**
+ * The areas a user's voice currently reaches, one polygon per token they speak through, for previews
+ * @param {foundry.documents.User} user
+ * @returns {Array<PIXI.Polygon>}
+ */
+export function get_voice_reach(user) {
+  const mode = get_voice_mode(user);
+  const shapes = [];
+  for (const data of _token_proximity_data.values()) {
+    if (!data.userlist.includes(user.uuid)) continue;
+    const shape = (data.sources[mode] ?? data.sources.normal)?.shape;
+    if (shape) shapes.push(shape);
+  }
+  return shapes;
+}
+
+/**
+ * @type {Map<String, {sources: Record<string, foundry.canvas.sources.PointSoundSource>, name: string, userlist: Array<String>}>}
  */
 let _token_proximity_data = new Map();
 
@@ -460,9 +561,14 @@ function _rebuild_source(token) {
     _token_proximity_data.delete(token.uuid);
     return;
   }
-  const soundsource = new foundry.canvas.sources.PointSoundSource({ object: null, sourceId: MODULE_ID + "." + token.uuid });
+  // one source per voice mode its speakers are using, since each mode has its own radius; Normal always exists
+  const sources = {};
+  const modes = new Set([VOICE_MODES.NORMAL, ...speakers.map(uuid => get_voice_mode(uuid.replace(/^User\./, "")))]);
+  for (const mode of modes) {
+    sources[mode] = new foundry.canvas.sources.PointSoundSource({ object: null, sourceId: MODULE_ID + "." + token.uuid + "." + mode });
+  }
   _token_proximity_data.set(token.uuid, {
-    soundsource,
+    sources,
     name: token.name,
     userlist: speakers
   });
@@ -480,16 +586,18 @@ function _move_source(token) {
   const radius = get_calculated_token_radius(token) * token_radius_type_pixel_multiplier(token, get_calculated_token_radius_type(token));
   const origin = token.getSoundOrigin(_position_override(token));
   try {
-    proximity_data.soundsource.initialize({
-      x: origin.x,
-      y: origin.y,
-      elevation: origin.elevation,
-      // without an explicit level the source falls back to whichever level this client happens to be viewing
-      level: token.level ?? canvas.level?.id,
-      radius,
-      walls: true,
-      disabled: false
-    });
+    for (const [mode, source] of Object.entries(proximity_data.sources)) {
+      source.initialize({
+        x: origin.x,
+        y: origin.y,
+        elevation: origin.elevation,
+        // without an explicit level the source falls back to whichever level this client happens to be viewing
+        level: token.level ?? canvas.level?.id,
+        radius: radius * _mode_range(mode),
+        walls: true,
+        disabled: false
+      });
+    }
   } catch (err) {
     console.error(MODULE_ID + " | failed to initialize proximity source for " + token.uuid, err);
     _token_proximity_data.delete(token.uuid);
@@ -566,11 +674,13 @@ function _calculate_user_volume(other_user, listeners) {
   let volume = 0;
   let loudest = null;
   let speaking_tokens = 0;
+  const mode = get_voice_mode(other_user);
   for (const proximity_token of _token_proximity_data.values()) {
     if (!proximity_token.userlist.includes(other_user.uuid)) continue;
     speaking_tokens++;
+    const source = proximity_token.sources[mode] ?? proximity_token.sources.normal;
     for (const listener of listeners) {
-      const token_volume = proximity_token.soundsource.getVolumeMultiplier(listener, { easing: true });
+      const token_volume = source.getVolumeMultiplier(listener, { easing: true });
       if (token_volume <= volume) continue;
       volume = token_volume;
       loudest = proximity_token.name;
@@ -581,8 +691,9 @@ function _calculate_user_volume(other_user, listeners) {
   if (!globalThis.canvas?.ready) return { volume: 0, reason: "no canvas, so only global speakers are heard" };
   if (speaking_tokens === 0) return { volume: 0, reason: "they speak through no token in this scene" };
   if (listeners.length === 0) return { volume: 0, reason: game.user.isGM ? "no token selected" : "you have no listening token" };
-  if (volume === 0) return { volume: 0, reason: "out of range of their tokens" };
-  return { volume, reason: "proximity, through their token \"" + loudest + "\"" };
+  const how = mode === VOICE_MODES.NORMAL ? "" : " (" + (mode === VOICE_MODES.WHISPER ? "whispering" : "yelling") + ")";
+  if (volume === 0) return { volume: 0, reason: "out of range of their tokens" + how };
+  return { volume, reason: "proximity, through their token \"" + loudest + "\"" + how };
 }
 
 /**
@@ -741,7 +852,9 @@ Hooks.on("updateUser", (_document, changed, _options, _userId) => {
   }
 });
 
-Hooks.on("userConnected", (user) => {
+Hooks.on("userConnected", (user, connected) => {
+  // a user who leaves comes back on Normal
+  if (!connected && _voice_modes.delete(user.id) && globalThis.canvas?.ready) _rebuild_all_sources();
   // a GM joining or leaving changes who speaks through the tokens they have selected
   if (user.isGM && globalThis.canvas?.ready) _rebuild_all_sources();
   else _schedule_volume_update();
@@ -824,7 +937,13 @@ function _request_calls(client) {
 Hooks.once("ready", () => {
   game.socket.on(_SOCKET, (message) => {
     if (message?.action === "call-me" && message.to === game.userId) _on_call_request?.(message.from);
+    if (message?.action === "voice-mode") _apply_voice_mode(message.from, message.mode);
+    // someone who just loaded asks for everyone's mode; only non-Normal modes need an answer
+    if (message?.action === "voice-mode-request" && get_voice_mode(game.user) !== VOICE_MODES.NORMAL) {
+      game.socket.emit(_SOCKET, { action: "voice-mode", from: game.user.id, mode: get_voice_mode(game.user) });
+    }
   });
+  game.socket.emit(_SOCKET, { action: "voice-mode-request", from: game.userId });
 });
 
 /**
@@ -1112,6 +1231,7 @@ export function diagnose() {
     sceneDisabled: !!(globalThis.canvas?.ready ? canvas.scene : game.scenes?.viewed)?.getFlag(MODULE_ID, "disabled"),
     youAreGlobalListener: is_global_listener(game.user),
     youAreGlobalSpeaker: is_global_speaker(game.user),
+    yourVoiceMode: get_voice_mode(game.user),
     listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name).join(", ") || "nothing" : "canvas not ready",
     speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name).join(", ") || "nothing",
     proximityTokens: _token_proximity_data.size,
@@ -1138,6 +1258,7 @@ export function diagnose() {
       user: user.name,
       connected,
       problem: problem || "none",
+      voiceMode: get_voice_mode(user),
       connection: peer ? (peer._pc?.connectionState ?? "?") + "/" + (peer._pc?.iceConnectionState ?? "?") + (peer.initiator ? " (we called)" : " (they called)") : "none",
       mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
       proximity: Number(volume.toFixed(2)),

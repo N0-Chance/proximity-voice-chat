@@ -42,7 +42,7 @@ globalThis.game = {
   modules: new Map([["proximity-voice-chat", { version: "test", active: true }]]),
   settings: { register: (m, k, c) => settings[k] = c.default, get: (m, k) => settings[k] },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
-  socket: { on() {}, emit() {} },
+  socket: { on: (n, fn) => socketHandlers.push(fn), emit() {} },
   keybindings: { register() {}, get: () => [] },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: { world: { mode: 3 }, client: {}, getUser: id => ({ volume: 0.64, muted: false, canBroadcastAudio: true }) }, client: { getConnectedUsers: () => users.map(u => u.id) } },
@@ -55,6 +55,8 @@ globalThis.fromUuid = async () => null;
 
 globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 let fails = 0;
+const socketHandlers = [];
+const receive = message => socketHandlers.forEach(fn => fn(message));
 const intervals = []; globalThis.setInterval = (fn) => (intervals.push(fn), 0); // keep node from hanging
 // Foundry only creates the canvas global during setup, after module scripts have loaded and timers can fire
 const stubCanvas = globalThis.canvas; delete globalThis.canvas;
@@ -200,6 +202,25 @@ await game.modules.get("proximity-voice-chat").api.set_global_listener(users[1],
 expect("Alice set as a global listener by the GM hears Bob anywhere", media.p2.volume, 0.64);
 await game.modules.get("proximity-voice-chat").api.set_global_listener(users[1], false); await tick();
 canvas.tokens.controlled = []; Hooks.callAll("controlToken"); await tick();
+// --- voice modes change how far a voice carries (default whisper 25%, yell 200% of the 1200px radius)
+const moveBob = x => { tokens[1].document.x = x; tokens[1].document._source.x = x; Hooks.callAll("refreshToken", { document: tokens[1].document, isOwner: false }, { refreshPosition: true }); };
+const eased = (d, r) => d >= r ? 0 : ((Math.cos(Math.PI * d / r) + 1) / 2);
+moveBob(1500); await tick();
+expect("Bob 15 tiles away, talking normally: out of range", media.p2.volume, 0);
+receive({ action: "voice-mode", from: "p2", mode: "yell" }); await tick();
+expect("Bob yelling from 15 tiles away carries to Alice", media.p2.volume, 0.64 * eased(1500, 2400) ** 2);
+moveBob(200); await tick();
+receive({ action: "voice-mode", from: "p2", mode: "whisper" }); await tick();
+expect("Bob whispering 2 tiles away (reach 3 tiles)", media.p2.volume, 0.64 * eased(200, 300) ** 2);
+moveBob(400); await tick();
+expect("Bob whispering 4 tiles away: out of reach", media.p2.volume, 0);
+Hooks.callAll("userConnected", users[2], false); await tick();
+check("a user who leaves is back on Normal", game.modules.get("proximity-voice-chat").api.get_voice_mode(users[2]) === "normal");
+// Global Speaking wins over the GM's mode
+users[0].flags.global_speaker = undefined;
+receive({ action: "voice-mode", from: "gm", mode: "whisper" }); await tick();
+expect("a whispering GM with Global Speaking on is still heard by everyone", media.gm.volume, 0.64);
+receive({ action: "voice-mode", from: "gm", mode: "normal" }); await tick();
 // userlist removed via flag update
 tokens[1].document.flags["proximity-voice-chat"].userlist = ""; Hooks.callAll("updateToken", tokens[1].document, { flags: { "proximity-voice-chat": { userlist: "" } } }); await tick();
 const rows = game.modules.get("proximity-voice-chat").api.diagnose();

@@ -121,4 +121,25 @@
   #players li.player.pvc-speaking .pvc-global-markers {
     margin-left: 0;
   }
+
+  /* Voice modes: blue for Whisper, orange for Yell, on the mode button and your own row */
+  #players .pvc-voice-button.pvc-mode-whisper,
+  #players li.player .pvc-mode-tag.pvc-mode-whisper {
+    color: #7ab8ff;
+  }
+
+  #players .pvc-voice-button.pvc-mode-yell,
+  #players li.player .pvc-mode-tag.pvc-mode-yell {
+    color: #ffa040;
+  }
+
+  #players li.player .pvc-mode-tag {
+    margin-left: auto;
+    padding-left: 0.5em;
+  }
+
+  #players li.player.pvc-speaking .pvc-mode-tag,
+  #players li.player .pvc-global-markers ~ .pvc-mode-tag {
+    margin-left: 0;
+  }
 }

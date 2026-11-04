@@ -52,7 +52,11 @@ globalThis.document = { hidden: false, createElement: t => new El(t), addEventLi
 
 // --- fake PIXI
 class Container {
-  constructor() { this.children = []; this.parent = null; this.destroyed = false; this.alpha = 1; }
+  constructor() {
+    this.children = []; this.parent = null; this.destroyed = false; this.alpha = 1;
+    this.position = { set: (x, y) => { this.x = x; this.y = y; } };
+    this.scale = { set: v => { this.scaleValue = v; } };
+  }
   addChild(c) { c.parent = this; this.children.push(c); return c; }
   destroy() { this.destroyed = true; if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
 }
@@ -61,11 +65,15 @@ class Graphics extends Container {
   beginFill(c) { this.fill = c; return this; }
   endFill() { return this; }
   drawCircle(x, y, r) { (this.circles ??= []).push({ x, y, r }); return this; }
+  drawPolygon(points) { (this.polygons ??= []).push(points); return this; }
 }
 class Sprite extends Container {
   constructor(t) { super(); this.texture = t; this.anchor = { set() {} }; this.position = { set: (x, y) => { this.x = x; this.y = y; } }; }
 }
-globalThis.PIXI = { Container, Graphics, Sprite };
+class Text extends Container {
+  constructor(text, style) { super(); this.text = text; this.style = style; this.anchor = { set() {} }; }
+}
+globalThis.PIXI = { Container, Graphics, Sprite, Text };
 
 // --- Foundry stubs
 globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
@@ -78,7 +86,7 @@ Date.now = () => now;
 const sheet = () => ({ TABS: { sheet: { tabs: [] } }, PARTS: { footer: {} } });
 class PointSoundSource {
   constructor() { this.data = {}; }
-  initialize(d) { Object.assign(this.data, d); }
+  initialize(d) { Object.assign(this.data, d); this.shape = { points: [this.data.x, this.data.y, this.data.x + this.data.radius, this.data.y] }; }
   getVolumeMultiplier(l) { const d = Math.hypot(l.x - this.data.x, l.y - this.data.y); return d > this.data.radius ? 0 : (Math.cos(Math.PI * d / this.data.radius) + 1) / 2; }
 }
 const dialogs = [];
@@ -131,7 +139,7 @@ globalThis.game = {
   modules: new Map([["proximity-voice-chat", { version: "1.2.3", active: true }]]),
   settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k], set: async (m, k, v) => { settings[k] = v; } },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
-  socket: { on() {}, emit() {} },
+  socket: { on: (n, fn) => socketHandlers.push(fn), emit: (n, data) => emitted.push(data) },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   webrtc: { settings: rtc, broadcasting: true, config: { render: () => configOpened++ },
     client: { getMediaStreamForUser: id => streams[id] ?? null, getLevelsStreamForUser: id => streams[id] ?? null } },
@@ -145,7 +153,10 @@ globalThis.game = {
   },
 };
 const tickers = new Set();
-globalThis.canvas = { ready: true, scene, level: { id: "L1" }, tokens: { controlled: [], ownedTokens: [], placeables: tokens }, app: { ticker: { add: f => tickers.add(f), remove: f => tickers.delete(f) } } };
+const socketHandlers = [];
+const emitted = [];
+const receive = message => socketHandlers.forEach(fn => fn(message));
+globalThis.canvas = { interface: new Container(), ready: true, scene, level: { id: "L1" }, tokens: { controlled: [], ownedTokens: [], placeables: tokens }, app: { ticker: { add: f => tickers.add(f), remove: f => tickers.delete(f) } } };
 const notices = [];
 globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ??= { volume: 1, paused: false, play() {} } }, notifications: { info: m => notices.push(m), warn: m => notices.push("WARN " + m), error: m => notices.push("ERROR " + m) } };
 globalThis.fromUuid = async () => null;
@@ -266,7 +277,7 @@ const activeBox = ui.players.element.querySelector("#players-active");
 check("voice bar is the last row of the active players box, not the inactive one", !!bar && activeBox.children.at(-1) === bar && !ui.players.element.querySelector("#players-inactive").children.includes(bar));
 check("voice bar is a list item inside that list", bar.tagName === "LI");
 const actions = bar.children.map(b => b.dataset.pvcAction).join(",");
-check("player bar has mic, deafen, settings only", actions === "mic,deafen,settings", actions);
+check("player bar has mic, voice mode, deafen, settings only", actions === "mic,mode,deafen,settings", actions);
 const button = a => bar.querySelector(`button[data-pvc-action="${a}"]`);
 check("mic button shows active (unmuted)", button("mic").classList.contains("active"));
 await button("mic").dispatch("click");
@@ -282,7 +293,7 @@ await button("settings").dispatch("click");
 check("settings button opens Foundry's A/V config", configOpened === 1);
 
 // --- hotkeys
-check("five hotkeys registered, unbound by default", keybindings.size === 5 && [...keybindings.values()].every(k => k.editable.length === 0), [...keybindings.keys()].join(","));
+check("seven hotkeys registered, unbound by default", keybindings.size === 7 && [...keybindings.values()].every(k => k.editable.length === 0), [...keybindings.keys()].join(","));
 check("Global Listen/Speak hotkeys are GM-only", keybindings.get("toggleGlobalListen").restricted && keybindings.get("toggleGlobalSpeak").restricted && !keybindings.get("toggleMic").restricted);
 check("tooltip without a binding is just the label", button("mic").dataset.tooltip === "proximity-voice-chat.UI.Mic", button("mic").dataset.tooltip);
 bound.toggleMic = [{ key: "KeyM", modifiers: ["Control"] }];
@@ -296,6 +307,76 @@ check("pressing it again unmutes", rtc.client.users.p1?.muted === false);
 keybindings.get("toggleDeafen").onDown(); await tick();
 check("deafen hotkey toggles deafen", rtc.client.muteAll === true);
 keybindings.get("toggleDeafen").onDown(); await tick();
+
+// --- voice modes
+const modeButton = () => bar.querySelector('button[data-pvc-action="mode"]');
+check("mode button sits next to the mic", bar.children.map(b => b.dataset.pvcAction).slice(0, 3).join(",") === "mic,mode,deafen");
+await modeButton().dispatch("click"); await tick();
+const api = game.modules.get("proximity-voice-chat").api;
+check("clicking the mode button switches to Whisper", api.get_voice_mode(users[1]) === "whisper");
+check("the change is announced to everyone", JSON.stringify(emitted.at(-1)) === JSON.stringify({ action: "voice-mode", from: "p1", mode: "whisper" }));
+check("the mode button turns blue with the shush icon", modeButton().classList.contains("pvc-mode-whisper") && modeButton().querySelector("i").className.includes("fa-face-shush"));
+check("your own row shows a persistent Whisper tag", row("p1").querySelector(".pvc-mode-tag")?.className.includes("pvc-mode-whisper"));
+const preview = canvas.interface.children.at(-1);
+check("switching shows your reach on your token, walls included", preview?.polygons?.length === 1 && preview.polygons[0][2] - preview.polygons[0][0] === 300, JSON.stringify(preview?.polygons));
+await modeButton().dispatch("click"); await tick();
+check("clicking again switches to Yell (orange, megaphone)", api.get_voice_mode(users[1]) === "yell" && modeButton().classList.contains("pvc-mode-yell") && modeButton().querySelector("i").className.includes("fa-megaphone"));
+check("the reach preview follows the new range", canvas.interface.children.at(-1).polygons[0][2] - canvas.interface.children.at(-1).polygons[0][0] === 2400);
+check("only one reach preview at a time", canvas.interface.children.filter(c => !c.destroyed).length === 1);
+await modeButton().dispatch("contextmenu"); await tick();
+check("right-click returns to Normal and clears the tag", api.get_voice_mode(users[1]) === "normal" && !row("p1").querySelector(".pvc-mode-tag"));
+check("tooltip names the current mode", modeButton().dataset.tooltip.includes("proximity-voice-chat.UI.Mode.normal"), modeButton().dataset.tooltip);
+
+// hotkeys: tap to switch and stay, tap again for Normal, hold to switch back on release
+const whisperKey = keybindings.get("whisper");
+check("Whisper and Yell hotkeys registered, unbound, with key-up handlers", !!whisperKey && !!keybindings.get("yell") && whisperKey.editable.length === 0 && typeof whisperKey.onUp === "function");
+whisperKey.onDown(); now += 100; whisperKey.onUp(); await tick();
+check("tapping Whisper switches and stays", api.get_voice_mode(users[1]) === "whisper");
+whisperKey.onDown(); now += 100; whisperKey.onUp(); await tick();
+check("tapping it again goes back to Normal", api.get_voice_mode(users[1]) === "normal");
+const previews = canvas.interface.children.length;
+keybindings.get("yell").onDown(); await tick();
+check("holding Yell yells", api.get_voice_mode(users[1]) === "yell");
+now += 600; keybindings.get("yell").onUp(); await tick();
+check("releasing after a hold goes back to the previous mode", api.get_voice_mode(users[1]) === "normal");
+check("the switch back doesn't flash the reach again", canvas.interface.children.filter(c => !c.destroyed).length <= 1 && canvas.interface.children.length <= previews + 1);
+
+// others' modes arrive over the socket; a whisper you can't hear stays private
+receive({ action: "voice-mode", from: "p2", mode: "whisper" }); await tick();
+check("Bob's mode arrives over the socket", api.get_voice_mode(users[2]) === "whisper");
+await runIntervals();
+await speak("p2", -20);
+check("Bob whispering 3 tiles away (reach 3 tiles) is silent for Alice", media.p2.volume === 0, String(media.p2.volume));
+check("...and shows no cue at all in the players list", !row("p2").classList.contains("pvc-speaking"));
+check("...nor on his token", !indicatorOn(tokens[1]));
+now += 1000; await speak("p2", -80);
+settings.whisperRange = 50; Hooks.callAll("canvasReady", canvas); await runIntervals();
+await speak("p2", -20);
+check("whisper range raised to 50%: Alice hears the whisper", media.p2.volume > 0);
+check("audible whisper: row shows the quiet speaker icon", row("p2").classList.contains("pvc-speaking") && row("p2").querySelector(".pvc-speaking-icon").className.includes("fa-volume-low"));
+check("audible whisper: dotted ring on his token", indicatorOn(tokens[1])?.pvcMode === "whisper" && indicatorOn(tokens[1]).children[0].circles?.length === 28);
+receive({ action: "voice-mode", from: "p2", mode: "yell" }); await runIntervals(); await speak("p2", -20);
+check("Bob yelling: megaphone in the list", row("p2").querySelector(".pvc-speaking-icon").className.includes("fa-megaphone"));
+check("Bob yelling: thick ring plus a ripple", indicatorOn(tokens[1])?.pvcMode === "yell" && indicatorOn(tokens[1]).children.some(c => c.pvcRipple));
+settings.speakingIndicatorOverride = "badge"; Hooks.callAll("drawToken"); await tick();
+check("Bob yelling, badge style: megaphone glyph on a bigger badge", indicatorOn(tokens[1])?.children.some(c => c.text === "\uf675"));
+settings.speakingIndicatorOverride = "icon"; Hooks.callAll("drawToken"); await tick();
+check("Bob yelling, icon style: megaphone glyph in the icon font", indicatorOn(tokens[1])?.children.some(c => c.text === "\uf675" && c.style.fontFamily[0] === "Font Awesome 7 Pro"));
+settings.speakingIndicatorOverride = "default"; settings.whisperRange = 25;
+now += 1000; await speak("p2", -80);
+receive({ action: "voice-mode", from: "p2", mode: "normal" }); await runIntervals();
+
+// someone joining asks for the current modes; only non-Normal modes answer
+api.set_voice_mode("whisper"); await tick();
+const before = emitted.length;
+receive({ action: "voice-mode-request", from: "p2" });
+// (this harness registers the socket handler once per simulated "ready", so count answers by content)
+const answers = emitted.slice(before);
+check("a join request is answered with your non-Normal mode", answers.length > 0 && answers.every(m => JSON.stringify(m) === JSON.stringify({ action: "voice-mode", from: "p1", mode: "whisper" })));
+api.set_voice_mode("normal"); await tick();
+const afterNormal = emitted.length;
+receive({ action: "voice-mode-request", from: "p2" });
+check("on Normal, a join request gets no answer", emitted.length === afterNormal);
 
 // --- right-click menu
 const options = []; Hooks.callAll("getUserContextOptions", ui.players, options);
@@ -312,7 +393,7 @@ check("volume slider sets Bob's volume", Math.abs(rtc.client.users.p2.volume - 0
 becomeUser("gm");
 renderPlayers();
 const gmBar = ui.players.element.querySelector(".pvc-voice-bar");
-check("GM bar adds Global Listen and Global Speak", gmBar.children.map(b => b.dataset.pvcAction).join(",") === "mic,deafen,settings,listen,speak");
+check("GM bar adds Global Listen and Global Speak", gmBar.children.map(b => b.dataset.pvcAction).join(",") === "mic,mode,deafen,settings,listen,speak");
 const gmButton = a => gmBar.querySelector(`button[data-pvc-action="${a}"]`);
 check("GM toggles start active (narrator defaults)", gmButton("listen").classList.contains("active") && gmButton("speak").classList.contains("active"));
 await gmButton("listen").dispatch("click"); await tick();
@@ -383,6 +464,17 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   const playerMenu = []; becomeUser("p1"); Hooks.callAll("getUserContextOptions", ui.players, playerMenu);
   check("players don't get these entries", playerMenu.filter(o => o.label.includes("Global")).every(o => !o.visible(li("p2"))));
   becomeUser("gm");
+}
+
+// --- a GM with Global Speaking on is heard by everyone whatever the mode, and is told so instead of shown a reach
+{
+  becomeUser("gm"); renderPlayers();
+  users[0].flags.global_speaker = true;
+  const previewsBefore = canvas.interface.children.filter(c => !c.destroyed).length;
+  game.modules.get("proximity-voice-chat").api.set_voice_mode("whisper"); await tick();
+  check("GM whispering with Global Speaking on is told everyone still hears them", notices.at(-1) === "proximity-voice-chat.UI.ModeGlobalSpeaking", notices.at(-1));
+  check("...and gets no reach preview", canvas.interface.children.filter(c => !c.destroyed).length <= previewsBefore);
+  game.modules.get("proximity-voice-chat").api.set_voice_mode("normal"); await tick();
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");

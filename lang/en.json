@@ -61,5 +61,17 @@
   "proximity-voice-chat.UI.GlobalSpeakOnNotice": "Everyone now hears {name}.",
   "proximity-voice-chat.UI.GlobalSpeakOffNotice": "{name} is now heard by proximity.",
   "proximity-voice-chat.UI.MarkerGlobalListener": "Hears everyone (Global Listening)",
-  "proximity-voice-chat.UI.MarkerGlobalSpeaker": "Heard by everyone (Global Speaking)"
+  "proximity-voice-chat.UI.MarkerGlobalSpeaker": "Heard by everyone (Global Speaking)",
+  "proximity-voice-chat.Settings.WhisperRange.Label": "Whisper Range (% of normal)",
+  "proximity-voice-chat.Settings.WhisperRange.Hint": "How far a whisper carries, as a percentage of the speaker's normal proximity radius.",
+  "proximity-voice-chat.Settings.YellRange.Label": "Yell Range (% of normal)",
+  "proximity-voice-chat.Settings.YellRange.Hint": "How far a yell carries, as a percentage of the speaker's normal proximity radius.",
+  "proximity-voice-chat.UI.VoiceMode": "Voice: {mode}. Click to cycle Normal, Whisper, Yell; right-click for Normal",
+  "proximity-voice-chat.UI.Mode.normal": "Normal",
+  "proximity-voice-chat.UI.Mode.whisper": "Whisper",
+  "proximity-voice-chat.UI.Mode.yell": "Yell",
+  "proximity-voice-chat.UI.ModeGlobalSpeaking": "Global Speaking is on, so everyone still hears you. Turn it off to whisper or yell.",
+  "proximity-voice-chat.Keybindings.whisper": "Whisper",
+  "proximity-voice-chat.Keybindings.yell": "Yell",
+  "proximity-voice-chat.Keybindings.ModeHint": "Tap to switch and stay; tap again for Normal. Hold while talking to switch back when you let go."
 }
