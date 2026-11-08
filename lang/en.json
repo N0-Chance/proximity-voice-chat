@@ -73,5 +73,12 @@
   "proximity-voice-chat.UI.ModeGlobalSpeaking": "Global Speaking is on, so everyone still hears you. Turn it off to whisper or yell.",
   "proximity-voice-chat.Keybindings.whisper": "Whisper",
   "proximity-voice-chat.Keybindings.yell": "Yell",
-  "proximity-voice-chat.Keybindings.ModeHint": "Tap to switch and stay; tap again for Normal. Hold while talking to switch back when you let go."
+  "proximity-voice-chat.Keybindings.ModeHint": "Tap to switch and stay; tap again for Normal. Hold while talking to switch back when you let go.",
+  "proximity-voice-chat.SelfTest.webrtc-disabled": "Proximity Voice Chat: WebRTC is disabled in this browser, so voice chat can't work. In Firefox, open about:config and check that media.peerconnection.enabled is true and media.peerconnection.ice.default_address_only, .no_host, .relay_only and .proxy_only are false (a user.js file can reset these on restart). Privacy extensions that block WebRTC can cause this too.",
+  "proximity-voice-chat.SelfTest.no-addresses": "Proximity Voice Chat: this browser isn't offering any network addresses for voice chat, so nobody can connect to you. In Firefox, open about:config and check that media.peerconnection.enabled is true and media.peerconnection.ice.default_address_only, .no_host, .relay_only and .proxy_only are false (a user.js file can reset these on restart). Privacy extensions that block WebRTC can cause this too.",
+  "proximity-voice-chat.SelfTest.relay-unreachable": "Proximity Voice Chat: the relay (TURN) server in the audio/video settings isn't reachable from this browser. Check its URL (it must start with turn:), username, password, and the server's firewall and port forwards.",
+  "proximity-voice-chat.SelfTest.relay-ok": "Proximity Voice Chat: the relay (TURN) server is reachable from this browser.",
+  "proximity-voice-chat.SelfTest.Player.webrtc-disabled": "Proximity Voice Chat: {name}'s browser has WebRTC disabled, so they can't hear or be heard. They need to re-enable it (Firefox: media.peerconnection.enabled in about:config) or use another browser.",
+  "proximity-voice-chat.SelfTest.Player.no-addresses": "Proximity Voice Chat: {name}'s browser isn't offering any network addresses, so nobody can connect to them. Likely a privacy setting or extension; Firefox users should check media.peerconnection.ice.* in about:config.",
+  "proximity-voice-chat.SelfTest.Player.relay-unreachable": "Proximity Voice Chat: the relay (TURN) server isn't reachable from {name}'s browser. Their network may block it, or the server isn't reachable from outside."
 }

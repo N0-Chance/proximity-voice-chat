@@ -6,7 +6,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.6.0";
+const SCRIPT_VERSION = "1.6.1";
 
 /**
  * The different types with which a radius can be measured
@@ -934,9 +934,164 @@ function _request_calls(client) {
   }
 }
 
+/* -------------------------------------------- */
+/*  Connection self-test                        */
+/* -------------------------------------------- */
+
+/**
+ * The relay (TURN) server from Foundry's A/V settings, if one is configured
+ * @returns {{url: string, username: string, password: string} | null}
+ */
+function _custom_relay() {
+  const turn = game.webrtc?.settings?.world?.turn;
+  if (turn?.type !== "custom" || !turn.url || !turn.username || !turn.password) return null;
+  return turn;
+}
+
+/**
+ * The ICE servers Foundry's voice chat uses: a custom relay replaces SimplePeer's default STUN servers entirely
+ * @returns {Array<RTCIceServer>}
+ */
+function _ice_servers() {
+  const relay = _custom_relay();
+  if (relay) return [{ urls: relay.url, username: relay.username, credential: relay.password }];
+  return globalThis.SimplePeer?.config?.iceServers ?? [{ urls: "stun:stun.l.google.com:19302" }];
+}
+
+/**
+ * Gathers this browser's network addresses ("ICE candidates") with a throwaway connection, the way a voice
+ * connection would. A browser that offers none can't be reached by anyone, relay or not.
+ * @param {number} [timeout] ms to wait for gathering to finish
+ * @returns {Promise<{supported: boolean, types: Record<string, number>}>} candidate counts by type (host, srflx, relay, ...)
+ */
+async function _gather_own_addresses(timeout = 6000) {
+  const PeerConnection = globalThis.RTCPeerConnection;
+  if (!PeerConnection) return { supported: false, types: {} };
+  const types = {};
+  let connection;
+  try {
+    connection = new PeerConnection({ iceServers: _ice_servers() });
+    connection.createDataChannel("proximity-voice-chat-self-test");
+    const gathered = new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeout);
+      connection.onicecandidate = (event) => {
+        if (!event.candidate) {
+          clearTimeout(timer);
+          return resolve();
+        }
+        const type = event.candidate.type ?? event.candidate.candidate?.match(/ typ (\w+)/)?.[1];
+        if (type) types[type] = (types[type] ?? 0) + 1;
+      };
+    });
+    await connection.setLocalDescription(await connection.createOffer());
+    await gathered;
+  } catch (err) {
+    console.warn(MODULE_ID + " | connection self-test failed", err);
+    if (!connection) return { supported: false, types: {} };
+  } finally {
+    connection?.close();
+  }
+  return { supported: true, types };
+}
+
+/**
+ * Turns a self-test result into a problem code
+ * @param {{supported: boolean, types: Record<string, number>}} result
+ * @returns {"webrtc-disabled" | "no-addresses" | "relay-unreachable" | null}
+ */
+function _self_test_problem(result) {
+  if (!result.supported) return "webrtc-disabled";
+  if (!Object.values(result.types).some(count => count > 0)) return "no-addresses";
+  if (_custom_relay() && !result.types.relay) return "relay-unreachable";
+  return null;
+}
+
+/** @type {{supported: boolean, types: Record<string, number>, problem: string | null} | null} */
+let _self_test = null;
+
+/**
+ * Tests this browser's ability to make voice connections, warns you if it can't, and tells the GMs, since players
+ * can't be expected to watch their consoles
+ * @param {{relay_changed?: boolean}} [options] relay_changed: the GM just changed the relay settings
+ */
+async function _run_self_test({ relay_changed = false } = {}) {
+  if (!_is_voice_active()) return;
+  const result = await _gather_own_addresses();
+  const problem = _self_test_problem(result);
+  _self_test = { ...result, problem };
+  if (problem === "webrtc-disabled" || problem === "no-addresses") {
+    ui.notifications.error("proximity-voice-chat.SelfTest." + problem, { localize: true, permanent: true });
+  } else if (problem === "relay-unreachable" && game.user.isGM) {
+    ui.notifications.warn("proximity-voice-chat.SelfTest.relay-unreachable", { localize: true, permanent: true });
+  } else if (!problem && relay_changed && game.user.isGM && _custom_relay()) {
+    ui.notifications.info("proximity-voice-chat.SelfTest.relay-ok", { localize: true });
+  }
+  if (problem) console.warn(MODULE_ID + " | connection self-test: " + problem, result.types);
+  _report_self_test();
+}
+
+function _report_self_test() {
+  if (!_self_test || game.user.isGM) return;
+  game.socket?.emit(_SOCKET, { action: "voice-self-test", from: game.user?.id ?? game.userId, problem: _self_test.problem, types: _self_test.types });
+}
+
+/**
+ * Shows a GM another user's failed self-test, by name, with what to do about it
+ * @param {{from: string, problem: string | null}} message
+ */
+/** The last self-test problem each user reported, so a GM isn't shown the same notice on every reload */
+const _reported_problems = new Map();
+
+function _on_self_test_report(message) {
+  if (!game.user.isGM) return;
+  const previous = _reported_problems.get(message.from) ?? null;
+  _reported_problems.set(message.from, message.problem ?? null);
+  if (!message.problem || message.problem === previous) return;
+  const user = game.users.get(message.from);
+  if (!user) return;
+  const notify = message.problem === "relay-unreachable" ? "warn" : "error";
+  ui.notifications[notify](game.i18n.format("proximity-voice-chat.SelfTest.Player." + message.problem, { name: user.name }), { permanent: true });
+}
+
+Hooks.on("rtcSettingsChanged", (_settings, changed) => {
+  // everyone re-tests when the GM changes the relay, so the GM finds out at once whether it works
+  if (changed?.world?.turn !== undefined) _run_self_test({ relay_changed: true });
+});
+
+/**
+ * Whether a voice connection runs directly or through a relay, from the browser's own connection statistics
+ * @param {object} peer a SimplePeer instance
+ * @returns {Promise<string>}
+ */
+async function _peer_route(peer) {
+  const connection = peer?._pc;
+  if (!connection?.getStats) return "none";
+  try {
+    const stats = await connection.getStats();
+    let pair = null;
+    stats.forEach(report => {
+      if (report.type === "transport" && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId) ?? pair;
+    });
+    if (!pair) stats.forEach(report => {
+      if (report.type === "candidate-pair" && report.state === "succeeded" && (report.selected || report.nominated)) pair = report;
+    });
+    if (!pair) return "not established";
+    const local = stats.get(pair.localCandidateId)?.candidateType;
+    const remote = stats.get(pair.remoteCandidateId)?.candidateType;
+    if (local === "relay") return "relayed (through your relay connection)";
+    if (remote === "relay") return "relayed (through theirs)";
+    return "direct";
+  } catch {
+    return "unknown";
+  }
+}
+
 Hooks.once("ready", () => {
   game.socket.on(_SOCKET, (message) => {
     if (message?.action === "call-me" && message.to === game.userId) _on_call_request?.(message.from);
+    if (message?.action === "voice-self-test") _on_self_test_report(message);
+    // a GM who loads later asks everyone for their self-test results
+    if (message?.action === "voice-self-test-request") _report_self_test();
     if (message?.action === "voice-mode") _apply_voice_mode(message.from, message.mode);
     // someone who just loaded asks for everyone's mode; only non-Normal modes need an answer
     if (message?.action === "voice-mode-request" && get_voice_mode(game.user) !== VOICE_MODES.NORMAL) {
@@ -944,6 +1099,8 @@ Hooks.once("ready", () => {
     }
   });
   game.socket.emit(_SOCKET, { action: "voice-mode-request", from: game.userId });
+  if (game.user?.isGM) game.socket.emit(_SOCKET, { action: "voice-self-test-request", from: game.userId });
+  _run_self_test();
 });
 
 /**
@@ -1217,10 +1374,13 @@ function _add_token_list_toggle(element, token) {
 /**
  * Logs what this client thinks about every other active user's voice, for troubleshooting.
  * Run in the browser console (F12) or a macro: game.modules.get("proximity-voice-chat").api.diagnose()
- * @returns {Array<object>} one row per other active user
+ * @returns {Promise<Array<object>>} one row per other active user
  */
-export function diagnose() {
+export async function diagnose() {
   const listeners = globalThis.canvas?.ready ? _get_listener_positions() : [];
+  const relay = _custom_relay();
+  const own = _self_test ?? { ...(await _gather_own_addresses()), problem: null };
+  own.problem ??= _self_test_problem(own);
   console.log(MODULE_ID + " | diagnose", {
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
@@ -1236,9 +1396,14 @@ export function diagnose() {
     speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name).join(", ") || "nothing",
     proximityTokens: _token_proximity_data.size,
     deafenedAll: !!game.webrtc?.settings?.client?.muteAll,
-    pageHadUserGesture: navigator.userActivation?.hasBeenActive
+    pageHadUserGesture: navigator.userActivation?.hasBeenActive,
+    relayServer: relay ? relay.url : "none (Foundry's default: no relay)",
+    yourAddresses: own.supported ? Object.entries(own.types).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled",
+    yourAddressProblem: own.problem ?? "none"
   });
-  const rows = game.users.filter(user => user.active && !user.isSelf).map((user) => {
+  const users = game.users.filter(user => user.active && !user.isSelf);
+  const routes = await Promise.all(users.map(user => _peer_route(game.webrtc?.client?.peers?.get(user.id))));
+  const rows = users.map((user, index) => {
     const element = _get_audio_element(user.id);
     const stream = element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
@@ -1250,7 +1415,8 @@ export function diagnose() {
     const peer_state = peer?._pc?.connectionState ?? null;
     const connected = peer_state === "connected";
     let problem = "";
-    if (!peer) problem = "NO VOICE CONNECTION to this user (not even an attempt)";
+    if (own.problem === "no-addresses" || own.problem === "webrtc-disabled") problem = "YOUR BROWSER can't make voice connections (" + own.problem + "); see yourAddressProblem above";
+    else if (!peer) problem = "NO VOICE CONNECTION to this user (not even an attempt)";
     else if (!connected) problem = "voice connection not established (" + (peer_state ?? "unknown") + "); look for 'ICE failed' or SimplePeer errors";
     else if (!element) problem = "connected but no audio element";
     else if (element.paused) problem = "audio element paused";
@@ -1260,11 +1426,12 @@ export function diagnose() {
       problem: problem || "none",
       voiceMode: get_voice_mode(user),
       connection: peer ? (peer._pc?.connectionState ?? "?") + "/" + (peer._pc?.iceConnectionState ?? "?") + (peer.initiator ? " (we called)" : " (they called)") : "none",
+      route: routes[index],
       mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
       proximity: Number(volume.toFixed(2)),
       reason,
       slider: Number(foundry.audio.AudioHelper.volumeToInput(settings?.volume ?? 1).toFixed(2)),
-      element: element ? element.tagName.toLowerCase() : "MISSING",
+      element: element ? (element.tagName?.toLowerCase() ?? "media") : "MISSING",
       elementVolume: element ? Number(element.volume.toFixed(2)) : null,
       paused: element?.paused ?? null,
       elementMuted: element?.muted ?? null,

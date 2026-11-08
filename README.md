@@ -82,16 +82,23 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 The token's **Proximity** tab holds its speaker list, listen list, and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
 
 ## Troubleshooting
+**Every browser checks itself when it loads.** It gathers its own network addresses the way a voice connection would, using your relay server if one is set. You get a message that stays on screen if:
+- WebRTC is disabled in the browser.
+- The browser offers no network addresses at all, so nobody can connect to it. This is usually a Firefox privacy setting or a browser extension.
+- A relay server is configured but this browser can't reach it.
+
+Failures are reported to the GM by player name, so players don't need to watch their consoles. When a GM changes the relay settings, every browser re-checks, and the GM is told straight away whether the relay works.
+
 Run this in the browser console (F12):
 
 ```js
 game.modules.get("proximity-voice-chat").api.diagnose()
 ```
 
-It prints one row per other user. Each row shows their current volume and why, and whether your voice connection to them really finished. It also shows the state of their audio.
+It prints one row per other user. Each row shows their current volume and why, whether your voice connection to them really finished, and whether it runs **direct** or **relayed**. It also shows the state of their audio. Above the table, it lists your relay server and the types of network address your browser offers.
 
 - **A red "old cached copy" error:** the browser is running a stale script. Clear the site's cached files and reload; in Chrome, open F12, right-click reload, and choose **Empty Cache and Hard Reload**.
-- **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a TURN relay in Foundry's audio/video settings: **Relay Server → Custom**.
+- **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a TURN relay server (for example coturn) and enter it in Foundry's audio/video settings under **Relay Server → Custom**. The URL must start with `turn:`. Foundry sends it to every player automatically.
 - **Firefox won't connect at all:** check `about:config`. `media.peerconnection.enabled` must be true, and `media.peerconnection.ice.no_host`, `.default_address_only`, `.relay_only`, and `.proxy_only` must be false.
 
 ## Differences from upstream
@@ -153,6 +160,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - The problem: Foundry checks every 8 seconds and replaces any connection that hasn't fully finished setting up, on both ends at once, without closing the old one. A leftover connection that later fails then tears down its replacement.
   - The module's fix: only one side of each pair calls, a connection gets 30 seconds to finish, events from replaced connections are ignored, and a fresh offer from a reloaded browser replaces the old connection immediately.
   - A browser that loads or reloads asks the other side to call it over the module's socket. It reconnects in seconds, not after the next 8-second poll.
+- **A connection self-test in every browser**, reported to the GM.
+  - Why: a browser that offers no network addresses, or can't reach the relay, fails silently. Speaking cues still light up, because Foundry's speaking signal travels over its server connection, so it looks like everything works except the audio.
 - **Deafen works.**
   - Why: Foundry 14.369's camera template reads `mutaAll` instead of `muteAll`, so its deafen button does nothing.
 
@@ -223,7 +232,7 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 ### Voice state
 * `get_user_volume(user_id: string): number`: how loud that user currently is for you, from 0 to 1
 * `get_speaking_token_uuids(user: User): string[]`: the tokens in the current scene that user speaks through
-* `diagnose(): object[]`: see [Troubleshooting](#troubleshooting)
+* `diagnose(): Promise<object[]>`: see [Troubleshooting](#troubleshooting)
 
 ## Development
 * Tests: `node test/smoke.mjs`, `node test/peers.mjs`, and `node test/ui.mjs`. They stub just enough of Foundry to run in Node.

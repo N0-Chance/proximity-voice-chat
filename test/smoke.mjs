@@ -223,6 +223,6 @@ expect("a whispering GM with Global Speaking on is still heard by everyone", med
 receive({ action: "voice-mode", from: "gm", mode: "normal" }); await tick();
 // userlist removed via flag update
 tokens[1].document.flags["proximity-voice-chat"].userlist = ""; Hooks.callAll("updateToken", tokens[1].document, { flags: { "proximity-voice-chat": { userlist: "" } } }); await tick();
-const rows = game.modules.get("proximity-voice-chat").api.diagnose();
+const rows = await game.modules.get("proximity-voice-chat").api.diagnose();
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");
 process.exit(fails ? 1 : 0);

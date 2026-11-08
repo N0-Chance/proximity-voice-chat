@@ -477,5 +477,91 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   game.modules.get("proximity-voice-chat").api.set_voice_mode("normal"); await tick();
 }
 
+// --- connection self-test: this browser's network addresses, the relay, and telling the GM
+{
+  class FakePeerConnection {
+    static candidates = [];
+    constructor(config) { this.config = config; FakePeerConnection.last = this; }
+    createDataChannel() {}
+    async createOffer() { return {}; }
+    async setLocalDescription() {
+      setTimeout(() => {
+        for (const type of FakePeerConnection.candidates) this.onicecandidate?.({ candidate: { type } });
+        this.onicecandidate?.({ candidate: null });
+      }, 0);
+    }
+    close() { this.closed = true; }
+  }
+  globalThis.RTCPeerConnection = FakePeerConnection;
+  const settle = () => new Promise(r => setTimeout(r, 20));
+  const relayChanged = async () => { Hooks.callAll("rtcSettingsChanged", rtc, { world: { turn: rtc.world.turn } }); await settle(); };
+
+  becomeUser("gm");
+  rtc.world.turn = { type: "server", url: "", username: "", password: "" };
+  FakePeerConnection.candidates = ["host", "srflx"];
+  let before = notices.length;
+  await relayChanged();
+  check("no relay configured, addresses found: no warnings", notices.length === before, notices.slice(before).join(" | "));
+  check("the test connection is closed afterwards", FakePeerConnection.last.closed === true);
+
+  rtc.world.turn = { type: "custom", url: "turn:turn.askew.us:3478", username: "u", password: "p" };
+  before = notices.length;
+  await relayChanged();
+  const servers = FakePeerConnection.last.config.iceServers;
+  check("with a custom relay, the test uses it the way Foundry does", servers.length === 1 && servers[0].urls === "turn:turn.askew.us:3478" && servers[0].credential === "p");
+  check("relay configured but no relay address: the GM is warned it's unreachable", notices.slice(before).includes("WARN proximity-voice-chat.SelfTest.relay-unreachable"), notices.slice(before).join(" | "));
+
+  FakePeerConnection.candidates = ["host", "srflx", "relay"];
+  before = notices.length;
+  await relayChanged();
+  check("relay address found after a settings change: the GM is told it works", notices.slice(before).includes("proximity-voice-chat.SelfTest.relay-ok"), notices.slice(before).join(" | "));
+
+  // a player whose browser offers no addresses at all (e.g. Firefox's default_address_only)
+  becomeUser("p1");
+  FakePeerConnection.candidates = [];
+  before = notices.length;
+  const sentBefore = emitted.length;
+  await relayChanged();
+  check("a browser offering no addresses gets an error that stays on screen", notices.slice(before).includes("ERROR proximity-voice-chat.SelfTest.no-addresses"), notices.slice(before).join(" | "));
+  const report = emitted.slice(sentBefore).find(m => m.action === "voice-self-test");
+  check("...and the failure is reported to the GMs", report?.problem === "no-addresses" && report.from === "p1", JSON.stringify(report));
+  const rows = await game.modules.get("proximity-voice-chat").api.diagnose();
+  check("diagnose blames this browser, not the connection", rows.every(r => r.problem.startsWith("YOUR BROWSER")), rows.map(r => r.problem).join(" | "));
+  const afterReport = emitted.length;
+  receive({ action: "voice-self-test-request", from: "gm" });
+  check("a GM loading later gets the result when they ask", emitted.slice(afterReport).some(m => m.action === "voice-self-test" && m.problem === "no-addresses"));
+
+  // the GM's side: a named notice for the failing player
+  becomeUser("gm");
+  before = notices.length;
+  receive({ action: "voice-self-test", from: "p2", problem: "no-addresses", types: {} });
+  check("the GM gets a notice naming the player and the cause", notices.slice(before).some(n => n.startsWith("ERROR proximity-voice-chat.SelfTest.Player.no-addresses") && n.includes("Bob")), notices.slice(before).join(" | "));
+  before = notices.length;
+  receive({ action: "voice-self-test", from: "p2", problem: "no-addresses", types: {} });
+  check("the same problem reported again (e.g. after a reload) isn't shown twice", notices.length === before);
+  receive({ action: "voice-self-test", from: "p2", problem: null, types: { host: 1 } });
+  check("a passing report shows nothing", notices.length === before);
+  receive({ action: "voice-self-test", from: "p2", problem: "no-addresses", types: {} });
+  check("but if it breaks again after passing, the GM hears about it", notices.length > before);
+
+  // diagnose: whether each connection is direct or relayed
+  FakePeerConnection.candidates = ["host", "srflx"];
+  await relayChanged();
+  const stats = new Map([
+    ["T1", { type: "transport", selectedCandidatePairId: "CP1" }],
+    ["CP1", { type: "candidate-pair", localCandidateId: "L1", remoteCandidateId: "R1", state: "succeeded" }],
+    ["L1", { type: "local-candidate", candidateType: "relay" }],
+    ["R1", { type: "remote-candidate", candidateType: "srflx" }]
+  ]);
+  game.webrtc.client.peers = new Map([["p2", { _pc: { connectionState: "connected", iceConnectionState: "connected", getStats: async () => stats } }]]);
+  let diag = await game.modules.get("proximity-voice-chat").api.diagnose();
+  check("diagnose shows a relayed connection", diag.find(r => r.user === "Bob")?.route === "relayed (through your relay connection)", diag.find(r => r.user === "Bob")?.route);
+  stats.set("L1", { type: "local-candidate", candidateType: "srflx" });
+  diag = await game.modules.get("proximity-voice-chat").api.diagnose();
+  check("...and a direct one", diag.find(r => r.user === "Bob")?.route === "direct");
+  rtc.world.turn = { type: "server", url: "", username: "", password: "" };
+  delete globalThis.RTCPeerConnection;
+}
+
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");
 process.exit(fails ? 1 : 0);
