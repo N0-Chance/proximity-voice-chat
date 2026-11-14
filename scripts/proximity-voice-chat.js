@@ -1,4 +1,5 @@
 import { register_voice_ui_settings, UI_SCRIPT_VERSION } from "./voice-ui.js";
+import { register_diagnostics, DIAG_SCRIPT_VERSION } from "./diagnostics.js";
 
 export const MODULE_ID = "proximity-voice-chat";
 
@@ -6,7 +7,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.6.1";
+const SCRIPT_VERSION = "1.6.2";
 
 /**
  * The different types with which a radius can be measured
@@ -386,6 +387,7 @@ Hooks.on("init", async () => {
   });
   _patch_simplepeer();
   register_voice_ui_settings();
+  register_diagnostics();
   // exposed api for macros
   game.modules.get(MODULE_ID).api = {
     RADIUS_TYPE,
@@ -425,6 +427,7 @@ Hooks.on("init", async () => {
     get_token_speakers,
     get_user_volume,
     get_speaking_token_uuids,
+    collect_diagnostics,
     diagnose
   }
 });
@@ -673,9 +676,10 @@ function _calculate_user_volume(other_user, listeners) {
   if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
   let volume = 0;
   let loudest = null;
+  let loudest_uuid = null;
   let speaking_tokens = 0;
   const mode = get_voice_mode(other_user);
-  for (const proximity_token of _token_proximity_data.values()) {
+  for (const [token_uuid, proximity_token] of _token_proximity_data) {
     if (!proximity_token.userlist.includes(other_user.uuid)) continue;
     speaking_tokens++;
     const source = proximity_token.sources[mode] ?? proximity_token.sources.normal;
@@ -684,6 +688,7 @@ function _calculate_user_volume(other_user, listeners) {
       if (token_volume <= volume) continue;
       volume = token_volume;
       loudest = proximity_token.name;
+      loudest_uuid = token_uuid;
       if (volume >= 1) break;
     }
     if (volume >= 1) break;
@@ -693,7 +698,7 @@ function _calculate_user_volume(other_user, listeners) {
   if (listeners.length === 0) return { volume: 0, reason: game.user.isGM ? "no token selected" : "you have no listening token" };
   const how = mode === VOICE_MODES.NORMAL ? "" : " (" + (mode === VOICE_MODES.WHISPER ? "whispering" : "yelling") + ")";
   if (volume === 0) return { volume: 0, reason: "out of range of their tokens" + how };
-  return { volume, reason: "proximity, through their token \"" + loudest + "\"" + how };
+  return { volume, reason: "proximity, through their token \"" + loudest + "\"" + how, token: { uuid: loudest_uuid, name: loudest } };
 }
 
 /**
@@ -862,8 +867,9 @@ Hooks.on("userConnected", (user, connected) => {
 
 Hooks.once("ready", () => {
   const installed = game.modules.get(MODULE_ID).version;
-  if (installed === SCRIPT_VERSION && UI_SCRIPT_VERSION === SCRIPT_VERSION) return;
-  const script = SCRIPT_VERSION === UI_SCRIPT_VERSION ? SCRIPT_VERSION : SCRIPT_VERSION + " / " + UI_SCRIPT_VERSION;
+  const versions = [SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION];
+  if (versions.every(version => version === installed)) return;
+  const script = [...new Set(versions)].join(" / ");
   const message = game.i18n.format("proximity-voice-chat.UI.StaleScript", { script, installed });
   console.error(MODULE_ID + " | " + message);
   ui.notifications.error(message, { permanent: true });
@@ -1372,72 +1378,149 @@ function _add_token_list_toggle(element, token) {
 
 
 /**
- * Logs what this client thinks about every other active user's voice, for troubleshooting.
- * Run in the browser console (F12) or a macro: game.modules.get("proximity-voice-chat").api.diagnose()
- * @returns {Promise<Array<object>>} one row per other active user
+ * Whether this client can see a token, so a player's own diagnostics don't reveal hidden tokens' names
+ * @param {string} uuid
+ * @returns {boolean}
  */
-export async function diagnose() {
+function _can_see_token(uuid) {
+  if (game.user.isGM) return true;
+  const token = globalThis.canvas?.tokens?.placeables.find(t => t.document.uuid === uuid);
+  return !!token && (token.visible || token.document.testUserPermission?.(game.user, "OBSERVER"));
+}
+
+/**
+ * Gathers everything about this client's voice: its own setup and one entry per other active user.
+ * @param {object} [options]
+ * @param {boolean} [options.redact] for a player's own view: hide names of tokens they can't see, and others'
+ *   voice modes unless they can hear them. Reports sent to a GM are collected without redaction.
+ * @returns {Promise<object>}
+ */
+export async function collect_diagnostics({ redact = false } = {}) {
   const listeners = globalThis.canvas?.ready ? _get_listener_positions() : [];
   const relay = _custom_relay();
   const own = _self_test ?? { ...(await _gather_own_addresses()), problem: null };
   own.problem ??= _self_test_problem(own);
-  console.log(MODULE_ID + " | diagnose", {
+  const me = game.webrtc?.settings?.getUser(game.user.id);
+  const self = {
+    id: game.user.id,
+    name: game.user.name,
+    isGM: game.user.isGM,
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
-    script: SCRIPT_VERSION,
-    uiScript: UI_SCRIPT_VERSION,
+    scripts: [...new Set([SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION])].join(" / "),
+    browser: navigator.userAgent,
     canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
     sceneDisabled: !!(globalThis.canvas?.ready ? canvas.scene : game.scenes?.viewed)?.getFlag(MODULE_ID, "disabled"),
-    youAreGlobalListener: is_global_listener(game.user),
-    youAreGlobalSpeaker: is_global_speaker(game.user),
-    yourVoiceMode: get_voice_mode(game.user),
-    listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name).join(", ") || "nothing" : "canvas not ready",
-    speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name).join(", ") || "nothing",
-    proximityTokens: _token_proximity_data.size,
-    deafenedAll: !!game.webrtc?.settings?.client?.muteAll,
-    pageHadUserGesture: navigator.userActivation?.hasBeenActive,
-    relayServer: relay ? relay.url : "none (Foundry's default: no relay)",
-    yourAddresses: own.supported ? Object.entries(own.types).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled",
-    yourAddressProblem: own.problem ?? "none"
-  });
+    globalListener: is_global_listener(game.user),
+    globalSpeaker: is_global_speaker(game.user),
+    voiceMode: get_voice_mode(game.user),
+    micMuted: !!me?.muted,
+    deafened: !!game.webrtc?.settings?.client?.muteAll,
+    listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name) : [],
+    speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name),
+    relay: relay ? relay.url : null,
+    webrtcSupported: own.supported,
+    addresses: own.types,
+    addressProblem: own.problem
+  };
   const users = game.users.filter(user => user.active && !user.isSelf);
   const routes = await Promise.all(users.map(user => _peer_route(game.webrtc?.client?.peers?.get(user.id))));
-  const rows = users.map((user, index) => {
+  const peers = users.map((user, index) => {
     const element = _get_audio_element(user.id);
     const stream = element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
-    const { volume, reason } = _calculate_user_volume(user, listeners);
+    let { volume, reason, token } = _calculate_user_volume(user, listeners);
+    if (redact && token && !_can_see_token(token.uuid)) reason = reason.replace("\"" + token.name + "\"", "you can't see");
     // Foundry's getConnectedUsers() lists anyone with a connection object, even one that never finished,
     // so ask the browser's own connection state instead
     const peer = game.webrtc?.client?.peers?.get(user.id);
-    const peer_state = peer?._pc?.connectionState ?? null;
-    const connected = peer_state === "connected";
-    let problem = "";
-    if (own.problem === "no-addresses" || own.problem === "webrtc-disabled") problem = "YOUR BROWSER can't make voice connections (" + own.problem + "); see yourAddressProblem above";
-    else if (!peer) problem = "NO VOICE CONNECTION to this user (not even an attempt)";
-    else if (!connected) problem = "voice connection not established (" + (peer_state ?? "unknown") + "); look for 'ICE failed' or SimplePeer errors";
-    else if (!element) problem = "connected but no audio element";
-    else if (element.paused) problem = "audio element paused";
+    const state = peer?._pc?.connectionState ?? null;
+    const connected = state === "connected";
+    let problem = null;
+    if (own.problem === "no-addresses" || own.problem === "webrtc-disabled") problem = "own-browser";
+    else if (!peer) problem = "no-connection";
+    else if (!connected) problem = "not-established";
+    else if (!element) problem = "no-audio-element";
+    else if (element.paused) problem = "paused";
     return {
-      user: user.name,
+      id: user.id,
+      name: user.name,
+      isGM: user.isGM,
       connected,
-      problem: problem || "none",
-      voiceMode: get_voice_mode(user),
-      connection: peer ? (peer._pc?.connectionState ?? "?") + "/" + (peer._pc?.iceConnectionState ?? "?") + (peer.initiator ? " (we called)" : " (they called)") : "none",
+      connectionState: state,
+      iceState: peer?._pc?.iceConnectionState ?? null,
+      weCalled: peer ? !!peer.initiator : null,
       route: routes[index],
-      mutedOrBlocked: !!settings?.muted || !settings?.canBroadcastAudio,
-      proximity: Number(volume.toFixed(2)),
+      problem,
+      voiceMode: redact && !(volume > 0) ? null : get_voice_mode(user),
+      muted: !!settings?.muted,
+      audioBlocked: settings ? !settings.canBroadcastAudio : false,
+      volume: Number(volume.toFixed(2)),
       reason,
       slider: Number(foundry.audio.AudioHelper.volumeToInput(settings?.volume ?? 1).toFixed(2)),
-      element: element ? (element.tagName?.toLowerCase() ?? "media") : "MISSING",
+      element: element ? (element.tagName?.toLowerCase() ?? "media") : null,
       elementVolume: element ? Number(element.volume.toFixed(2)) : null,
       paused: element?.paused ?? null,
       elementMuted: element?.muted ?? null,
       audioTracks: tracks.map(t => (t.enabled ? "on" : "off") + "/" + t.readyState + (t.muted ? "/no-data" : "")).join(", ") || "none"
     };
   });
+  return { at: Date.now(), redacted: redact, self, peers };
+}
+
+const _PROBLEM_TEXT = {
+  "own-browser": "YOUR BROWSER can't make voice connections; see yourAddressProblem above",
+  "no-connection": "NO VOICE CONNECTION to this user (not even an attempt)",
+  "not-established": "voice connection not established; look for 'ICE failed' or SimplePeer errors",
+  "no-audio-element": "connected but no audio element",
+  "paused": "audio element paused"
+};
+
+/**
+ * Logs what this client thinks about every other active user's voice, for troubleshooting.
+ * Run in the browser console (F12) or a macro: game.modules.get("proximity-voice-chat").api.diagnose()
+ * Players can use Configure Settings > Voice Diagnostics instead, which shows the same data in a window.
+ * @returns {Promise<Array<object>>} one row per other active user
+ */
+export async function diagnose() {
+  const { self, peers } = await collect_diagnostics();
+  console.log(MODULE_ID + " | diagnose", {
+    foundry: self.foundry,
+    module: self.module,
+    scripts: self.scripts,
+    canvasReady: self.canvasReady,
+    voiceActive: self.voiceActive,
+    sceneDisabled: self.sceneDisabled,
+    youAreGlobalListener: self.globalListener,
+    youAreGlobalSpeaker: self.globalSpeaker,
+    yourVoiceMode: self.voiceMode,
+    listeningThrough: self.listeningThrough.join(", ") || "nothing",
+    speakingThrough: self.speakingThrough.join(", ") || "nothing",
+    proximityTokens: _token_proximity_data.size,
+    deafenedAll: self.deafened,
+    relayServer: self.relay ?? "none (Foundry's default: no relay)",
+    yourAddresses: self.webrtcSupported ? Object.entries(self.addresses).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled",
+    yourAddressProblem: self.addressProblem ?? "none"
+  });
+  const rows = peers.map(peer => ({
+    user: peer.name,
+    connected: peer.connected,
+    problem: peer.problem ? _PROBLEM_TEXT[peer.problem] + (peer.problem === "not-established" ? " (" + (peer.connectionState ?? "unknown") + ")" : "") : "none",
+    voiceMode: peer.voiceMode,
+    connection: peer.connectionState === null ? "none" : peer.connectionState + "/" + peer.iceState + (peer.weCalled ? " (we called)" : " (they called)"),
+    route: peer.route,
+    mutedOrBlocked: peer.muted || peer.audioBlocked,
+    proximity: peer.volume,
+    reason: peer.reason,
+    slider: peer.slider,
+    element: peer.element ?? "MISSING",
+    elementVolume: peer.elementVolume,
+    paused: peer.paused,
+    elementMuted: peer.elementMuted,
+    audioTracks: peer.audioTracks
+  }));
   console.table(rows);
   return rows;
 }

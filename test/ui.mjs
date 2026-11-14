@@ -24,6 +24,12 @@ class El {
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return this.attrs[k] ?? null; }
   append(...kids) { for (const k of kids) { k.parentElement = this; this.children.push(k); } }
+  replaceChildren(...kids) { this.children = []; this.append(...kids); }
+  get outerHTML() {
+    const tag = this.tagName.toLowerCase();
+    const inner = this.children.length ? this.children.map(c => c.outerHTML).join("") : escapeText(this.textContent ?? "");
+    return "<" + tag + (this.className ? ' class="' + this.className + '"' : "") + ">" + inner + "</" + tag + ">";
+  }
   appendChild(k) { this.append(k); return k; }
   after(k) { const p = this.parentElement; const i = p.children.indexOf(this); k.parentElement = p; p.children.splice(i + 1, 0, k); }
   remove() { const p = this.parentElement; if (p) p.children.splice(p.children.indexOf(this), 1); this.parentElement = null; }
@@ -44,11 +50,14 @@ class El {
     }
     return true;
   }
-  querySelectorAll(sel) { const out = []; const walk = e => { for (const c of e.children) { if (c._matches(sel)) out.push(c); walk(c); } }; walk(this); return out; }
+  querySelectorAll(sel) { const out = []; const walk = e => { for (const c of e.children) { if (!(c instanceof El)) continue; if (c._matches(sel)) out.push(c); walk(c); } }; walk(this); return out; }
   querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null; }
 }
+const escapeText = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const allText = e => (e.children?.length ? e.children.map(allText).join(" ") : (e.textContent ?? ""));
 const bodyClasses = new El("body");
-globalThis.document = { hidden: false, createElement: t => new El(t), addEventListener() {}, querySelector: () => null, body: bodyClasses };
+globalThis.document = { hidden: false, createElement: t => new El(t), addEventListener() {}, querySelector: () => null, body: bodyClasses,
+  createTextNode: text => ({ textContent: text, outerHTML: escapeText(text), children: [] }) };
 
 // --- fake PIXI
 class Container {
@@ -78,7 +87,12 @@ globalThis.PIXI = { Container, Graphics, Sprite, Text };
 // --- Foundry stubs
 globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 const hooks = {};
-globalThis.Hooks = { on: (n, f) => (hooks[n] ??= []).push(f), once: (n, f) => (hooks[n] ??= []).push(f), callAll: (n, ...a) => (hooks[n] ?? []).forEach(f => f(...a)) };
+// like Foundry: once() handlers run a single time
+globalThis.Hooks = {
+  on: (n, f) => (hooks[n] ??= []).push(f),
+  once: (n, f) => { const w = (...a) => { hooks[n] = hooks[n].filter(x => x !== w); return f(...a); }; (hooks[n] ??= []).push(w); },
+  callAll: (n, ...a) => [...(hooks[n] ?? [])].forEach(f => f(...a))
+};
 const intervals = [];
 globalThis.setInterval = fn => (intervals.push(fn), 0);
 let now = 1000;
@@ -95,8 +109,26 @@ class DialogV2 {
   async render() { this.element = new El("div"); const input = new El("input"); input.className = "pvc-volume"; this.element.append(input); return this; }
 }
 const humanizeBinding = b => [...(b.modifiers ?? []), b.key].join(" + ");
+const windows = [];
+class FakeApplicationV2 {
+  constructor(options = {}) { this.options = { ...this.constructor.DEFAULT_OPTIONS, ...options }; windows.push(this); }
+  async _prepareContext() { return {}; }
+  async render() {
+    const context = await this._prepareContext({});
+    this.content ??= new El("section");
+    this._replaceHTML(await this._renderHTML(context, {}), this.content, {});
+    this.rendered = true;
+    return this;
+  }
+  async click(action) { await this.options.actions[action].call(this, {}, null); }
+}
+const menus = new Map();
+const settingConfigs = {};
+const created = [];
+const copied = [];
+globalThis.ChatMessage = { implementation: { create: async data => (created.push(data), data), getWhisperRecipients: () => users.filter(u => u.isGM) } };
 globalThis.foundry = {
-  applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() }, api: { DialogV2 },
+  applications: { sheets: { TokenConfig: sheet(), PrototypeTokenConfig: sheet(), SceneConfig: sheet() }, api: { DialogV2, ApplicationV2: FakeApplicationV2 },
     sidebar: { apps: { ControlsConfig: { humanizeBinding } } } },
   canvas: { sources: { PointSoundSource }, loadTexture: async () => ({ fake: "texture" }) },
   av: { AVSettings: { AV_MODES: { DISABLED: 0, AUDIO: 1, VIDEO: 2, AUDIO_VIDEO: 3 } } },
@@ -137,7 +169,10 @@ const bound = {};
 globalThis.game = {
   version: "14.369",
   modules: new Map([["proximity-voice-chat", { version: "1.2.3", active: true }]]),
-  settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k], set: async (m, k, v) => { settings[k] = v; } },
+  // like Foundry: set() runs the setting's onChange
+  settings: { register: (m, k, c) => { settings[k] ??= c.default; settingConfigs[k] = c; }, get: (m, k) => settings[k],
+    set: async (m, k, v) => { settings[k] = v; settingConfigs[k]?.onChange?.(v); }, registerMenu: (m, k, data) => menus.set(k, data) },
+  clipboard: { copyPlainText: async text => copied.push(text) },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
   socket: { on: (n, fn) => socketHandlers.push(fn), emit: (n, data) => emitted.push(data) },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
@@ -203,9 +238,9 @@ await runIntervals();
 
 // --- dock
 check("dock hidden by default (world setting on)", bodyClasses.classList.contains("pvc-hide-dock"));
-settings.showCameraDock = true; Hooks.callAll("ready"); await tick();
+await game.settings.set("proximity-voice-chat", "showCameraDock", true); await tick();
 check("player override 'show dock anyway' brings it back", !bodyClasses.classList.contains("pvc-hide-dock"));
-settings.showCameraDock = false; Hooks.callAll("ready"); await tick();
+await game.settings.set("proximity-voice-chat", "showCameraDock", false); await tick();
 
 // --- speaking detection and cues
 check("level reports started for every active user", ["gm", "p1", "p2"].every(id => levelReports.has("proximity-voice-chat." + id)));
@@ -370,9 +405,8 @@ receive({ action: "voice-mode", from: "p2", mode: "normal" }); await runInterval
 api.set_voice_mode("whisper"); await tick();
 const before = emitted.length;
 receive({ action: "voice-mode-request", from: "p2" });
-// (this harness registers the socket handler once per simulated "ready", so count answers by content)
 const answers = emitted.slice(before);
-check("a join request is answered with your non-Normal mode", answers.length > 0 && answers.every(m => JSON.stringify(m) === JSON.stringify({ action: "voice-mode", from: "p1", mode: "whisper" })));
+check("a join request is answered with your non-Normal mode", answers.length === 1 && JSON.stringify(answers[0]) === JSON.stringify({ action: "voice-mode", from: "p1", mode: "whisper" }));
 api.set_voice_mode("normal"); await tick();
 const afterNormal = emitted.length;
 receive({ action: "voice-mode-request", from: "p2" });
@@ -561,6 +595,92 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   check("...and a direct one", diag.find(r => r.user === "Bob")?.route === "direct");
   rtc.world.turn = { type: "server", url: "", username: "", password: "" };
   delete globalThis.RTCPeerConnection;
+}
+
+// --- voice diagnostics window, reports to the GM, and remote requests
+{
+  const api = game.modules.get("proximity-voice-chat").api;
+  const menu = menus.get("diagnostics");
+  check("Voice Diagnostics is a settings menu button everyone can use", !!menu && menu.restricted === false && menu.type.prototype instanceof FakeApplicationV2);
+
+  // Alice opens it herself from her own row in the players list
+  becomeUser("p1"); renderPlayers();
+  tokens[1].document.x = 300; tokens[1].document._source.x = 300; Hooks.callAll("canvasReady", canvas); await runIntervals();
+  tokens[1].visible = false;// Bob's token is hidden from Alice
+  const menuEntries = []; Hooks.callAll("getUserContextOptions", ui.players, menuEntries);
+  const own = menuEntries.find(o => o.label === "proximity-voice-chat.Diagnostics.Menu.Label");
+  check("right-clicking your own row offers Voice Diagnostics, not on others' rows", own.visible(li("p1")) && !own.visible(li("p2")));
+  const opened = windows.length;
+  await own.onClick({}, li("p1")); await tick();
+  const win = windows[opened];
+  check("it opens the diagnostics window", !!win?.rendered);
+  const text = allText(win.content);
+  check("the window starts with a plain-language summary", text.includes("proximity-voice-chat.Diagnostics.Summary."), text.slice(0, 120));
+  const bobRow = win.content.querySelectorAll("tr").find(r => r.dataset.userId === "p2");
+  check("each player gets a row with a plain-language status", !!bobRow && allText(bobRow).includes("proximity-voice-chat.Diagnostics.Peer."), bobRow && allText(bobRow));
+  check("a player's own view hides the name of a token they can't see", win.report.peers.find(p => p.id === "p2").reason.includes("you can't see") && !JSON.stringify(win.report).includes('"bob\\"'), win.report.peers.find(p => p.id === "p2").reason);
+  check("...and is marked as redacted", win.report.redacted === true);
+  const buttons = win.content.querySelectorAll("button").map(b => b.dataset.action).join(",");
+  check("the player's window offers Run Again, Copy Report and Send to GM", buttons === "rerun,copy,send", buttons);
+  tokens[1].visible = true;
+
+  await win.click("copy");
+  check("Copy Report puts a readable text report on the clipboard", copied.at(-1)?.includes("proximity-voice-chat.Diagnostics.Text.Heading") && copied.at(-1).includes("- Bob:"), copied.at(-1));
+
+  game.users.activeGM = null;
+  let before = notices.length;
+  await win.click("send");
+  check("Send to GM with no GM online says so", notices.slice(before).includes("WARN proximity-voice-chat.Diagnostics.NoGM"), notices.slice(before).join(" | "));
+  game.users.activeGM = users[0];
+  const sentBefore = emitted.length;
+  await win.click("send");
+  const sent = emitted.slice(sentBefore).find(m => m.action === "diagnostics-report");
+  check("Send to GM sends the full, unredacted report over the socket (not a chat message the player could read)", sent?.to === null && sent.report.redacted === false && created.length === 0, JSON.stringify(sent && { to: sent.to, redacted: sent.report.redacted }));
+
+  // the GM requests a player's diagnostics remotely
+  becomeUser("p1");
+  before = notices.length;
+  const replyBefore = emitted.length;
+  receive({ action: "diagnostics-request", from: "gm", to: "p1" }); await tick(); await tick();
+  check("the player is told the GM ran diagnostics", notices.slice(before).some(n => n.includes("proximity-voice-chat.Diagnostics.RanByGM")), notices.slice(before).join(" | "));
+  const reply = emitted.slice(replyBefore).find(m => m.action === "diagnostics-report");
+  check("...and the report goes back to that GM", reply?.to === "gm" && reply.from === "p1");
+
+  becomeUser("gm"); renderPlayers();
+  const gmEntries = []; Hooks.callAll("getUserContextOptions", ui.players, gmEntries);
+  const request = gmEntries.find(o => o.label === "proximity-voice-chat.Diagnostics.Request");
+  check("GMs can request diagnostics from another active player", request.visible(li("p2")) && !request.visible(li("gm")));
+  const reqBefore = emitted.length;
+  request.onClick({}, li("p2"));
+  check("requesting sends the request to that player", emitted.slice(reqBefore).some(m => m.action === "diagnostics-request" && m.to === "p2" && m.from === "gm"));
+
+  // the requesting GM's browser posts the card, whispered to GMs, and opens the report
+  const report = JSON.parse(JSON.stringify(reply.report));
+  report.self.name = "<b>Alice</b>";
+  const windowsBefore = windows.length;
+  receive({ action: "diagnostics-report", from: "p1", to: "gm", report }); await tick(); await tick();
+  const card = created.at(-1);
+  check("the GM's browser posts a chat card whispered only to GMs", !!card && JSON.stringify(card.whisper) === JSON.stringify(["gm"]) && card.flags["proximity-voice-chat"].report === report);
+  check("the card escapes the player's name", card.content.includes("&lt;b&gt;Alice&lt;/b&gt;") && !card.content.includes("<b>Alice"), card.content);
+  check("the report window opens for the GM who asked", windows.length === windowsBefore + 1 && windows.at(-1).remote === true);
+  const remoteButtons = windows.at(-1).content.querySelectorAll("button").map(b => b.dataset.action).join(",");
+  check("a received report offers Copy and Request Again, not Run Again or Send", remoteButtons === "copy,request", remoteButtons);
+
+  // a report another GM asked for is posted by that GM, not this one
+  const createdBefore = created.length;
+  receive({ action: "diagnostics-report", from: "p2", to: "other-gm", report }); await tick();
+  check("only the GM who asked posts the card", created.length === createdBefore);
+  // an unprompted report is posted by the active GM
+  receive({ action: "diagnostics-report", from: "p2", to: null, report }); await tick();
+  check("a report sent unprompted is posted by the active GM", created.length === createdBefore + 1);
+
+  // the chat card's button opens the report it carries
+  const html = new El("div"); const open = new El("button"); open.className = "pvc-open-report"; html.append(open);
+  const message = { getFlag: (m, k) => (m === "proximity-voice-chat" && k === "report" ? report : undefined) };
+  Hooks.callAll("renderChatMessageHTML", message, html);
+  const fromCard = windows.length;
+  await open.dispatch("click"); await tick();
+  check("the chat card's Open Report button opens the stored report", windows.length === fromCard + 1 && windows.at(-1).report === report);
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");

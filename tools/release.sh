@@ -16,6 +16,8 @@ sed -i "s/^const SCRIPT_VERSION = \"[^\"]*\";/const SCRIPT_VERSION = \"$version\
 grep -q "^const SCRIPT_VERSION = \"$version\";" scripts/proximity-voice-chat.js || { echo "failed to set SCRIPT_VERSION" >&2; exit 1; }
 sed -i "s/^export const UI_SCRIPT_VERSION = \"[^\"]*\";/export const UI_SCRIPT_VERSION = \"$version\";/" scripts/voice-ui.js
 grep -q "^export const UI_SCRIPT_VERSION = \"$version\";" scripts/voice-ui.js || { echo "failed to set UI_SCRIPT_VERSION" >&2; exit 1; }
+sed -i "s/^export const DIAG_SCRIPT_VERSION = \"[^\"]*\";/export const DIAG_SCRIPT_VERSION = \"$version\";/" scripts/diagnostics.js
+grep -q "^export const DIAG_SCRIPT_VERSION = \"$version\";" scripts/diagnostics.js || { echo "failed to set DIAG_SCRIPT_VERSION" >&2; exit 1; }
 
 tmp=$(mktemp)
 jq --arg v "$version" --arg d "$repo/releases/download/v$version/module.zip" \

@@ -142,4 +142,68 @@
   #players li.player .pvc-global-markers ~ .pvc-mode-tag {
     margin-left: 0;
   }
+
+  /* Voice diagnostics window and chat card */
+  .pvc-diagnostics-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pvc-report .pvc-status {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 2px 0;
+  }
+
+  .pvc-ok > i, .pvc-status.pvc-ok > i { color: #5fd35f; }
+  .pvc-info > i, .pvc-status.pvc-info > i { color: #8fb8ff; }
+  .pvc-warn > i, .pvc-status.pvc-warn > i { color: #e8c547; }
+  .pvc-bad > i, .pvc-status.pvc-bad > i { color: #ff6b6b; }
+
+  .pvc-report .pvc-peers {
+    width: 100%;
+    margin: 6px 0;
+  }
+
+  .pvc-report .pvc-peers td:first-child,
+  .pvc-report .pvc-peers td:last-child {
+    white-space: nowrap;
+  }
+
+  .pvc-report tr.pvc-bad td:nth-child(2) i { color: #ff6b6b; }
+  .pvc-report tr.pvc-warn td:nth-child(2) i { color: #e8c547; }
+  .pvc-report tr.pvc-ok td:nth-child(2) i { color: #5fd35f; }
+  .pvc-report tr.pvc-info td:nth-child(2) i { color: #8fb8ff; }
+
+  .pvc-report .pvc-facts {
+    margin: 4px 0;
+    padding-left: 1.2em;
+    opacity: 0.85;
+  }
+
+  .pvc-report .pvc-details pre {
+    max-height: 18rem;
+    overflow: auto;
+    font-size: var(--font-size-11, 11px);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .pvc-diagnostics-buttons {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .pvc-report-card .pvc-status {
+    display: flex;
+    gap: 6px;
+    margin: 4px 0;
+  }
+
+  .pvc-report-card .pvc-open-report {
+    width: 100%;
+  }
 }

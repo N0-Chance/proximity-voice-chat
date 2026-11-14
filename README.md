@@ -82,6 +82,16 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 The token's **Proximity** tab holds its speaker list, listen list, and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
 
 ## Troubleshooting
+**Voice Diagnostics** shows, in plain language, whether your voice chat is working and why not. Open it from **Configure Settings → Proximity Voice Chat → Voice Diagnostics**, or right-click yourself in the players list.
+- **The summary** at the top says how many players you're connected to and lists any problems with your own browser, with the fix.
+- **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed.
+- **Buttons:**
+  - **Run Again**
+  - **Copy Report**, plain text for Discord
+  - **Send to GM**
+- **For GMs:** right-click any player and choose **Request Voice Diagnostics**. Their browser runs it and sends the report back, and they see a short notice that you did. Reports arrive as chat cards whispered to the GMs, with a button that opens the full report, and they stay in the chat log for later.
+- **Privacy:** a player's own window hides the names of tokens they can't see, and other players' voice modes unless they can hear them. Reports sent to GMs keep full detail. The GM's browser posts the card, because a player could otherwise read their own whispered report in their chat log.
+
 **Every browser checks itself when it loads.** It gathers its own network addresses the way a voice connection would, using your relay server if one is set. You get a message that stays on screen if:
 - WebRTC is disabled in the browser.
 - The browser offers no network addresses at all, so nobody can connect to it. This is usually a Firefox privacy setting or a browser extension.
@@ -89,7 +99,7 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
 
 Failures are reported to the GM by player name, so players don't need to watch their consoles. When a GM changes the relay settings, every browser re-checks, and the GM is told straight away whether the relay works.
 
-Run this in the browser console (F12):
+For the same data with more technical detail, run this in the browser console (F12):
 
 ```js
 game.modules.get("proximity-voice-chat").api.diagnose()
@@ -171,6 +181,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 - **Speaking is detected from the audio you receive**, with its own threshold setting.
   - Why: Foundry's own "speaking" signal stays on permanently in always-on voice mode. A separate threshold means tuning cues doesn't change when anyone transmits in voice-activated mode.
 - **New hotkeys, right-click volume and audio blocking, and `diagnose()`** with a Debug Logging setting.
+- **Voice Diagnostics**: a window in place of the console, and GM-requested reports delivered as chat cards.
+  - Why: asking players to open the browser console is unreliable, and the GM is the one who needs the data.
 - **A stale-script check:** the scripts know their own version and show an error that stays on screen when a browser runs an old cached copy.
 
 ### Packaging
@@ -228,6 +240,9 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 * `set_voice_mode(mode: string): void`: sets your own mode and tells everyone
 * `get_voice_reach(user: User): PIXI.Polygon[]`: the areas that user's voice currently reaches, one per token they speak through
 * Hook `proximityVoiceModeChanged(user: User, mode: string)` fires on every client when anyone's mode changes
+
+### Diagnostics
+* `collect_diagnostics({ redact?: boolean }): Promise<object>`: the report behind Voice Diagnostics: this browser's setup and one entry per other active user. `redact` hides what a player couldn't otherwise know.
 
 ### Voice state
 * `get_user_volume(user_id: string): number`: how loud that user currently is for you, from 0 to 1
