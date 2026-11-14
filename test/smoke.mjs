@@ -12,7 +12,9 @@ globalThis.document = { hidden: false, createElement: el, addEventListener() {},
   body: { classList: { toggle() {} } } };
 const sheet = () => ({ TABS: { sheet: { tabs: [] } }, PARTS: { a: {}, footer: {} } });
 const media = {};
-const mkMedia = (id) => (media[id] = { tagName: "VIDEO", volume: 1, paused: false, muted: false, srcObject: null, plays: 0, play() { this.plays++; this.paused = false; return Promise.resolve(); } });
+// each element plays a stream with one live audio track, as for a user with a working microphone
+const liveStream = () => ({ getAudioTracks: () => [{ enabled: true, readyState: "live", muted: false }] });
+const mkMedia = (id) => (media[id] = { tagName: "VIDEO", volume: 1, paused: false, muted: false, srcObject: liveStream(), plays: 0, play() { this.plays++; this.paused = false; return Promise.resolve(); } });
 class PointSoundSource {
   constructor(o) { this.o = o; this.data = {}; }
   initialize(d) { Object.assign(this.data, d); if (!d.level) throw new Error("no level"); }
@@ -131,7 +133,12 @@ expect("Alice hears Bob after he walks away", media.p2.volume, 0);
 // paused element gets resumed when volume returns
 media.p2.paused = true; tokens[1].document.x = 0; Hooks.callAll("refreshToken", { document: tokens[1].document, isOwner: false }, { refreshPosition: true }); await tick();
 expect("Alice hears Bob next to her", media.p2.volume, 0.64);
-console.log("     paused element resumed:", media.p2.plays === 1);
+{ const ok = media.p2.plays === 1; if (!ok) fails++; console.log((ok ? "ok  " : "FAIL") + " a paused element with audio is resumed when its volume comes back"); }
+// an element with no stream (a user with no microphone) has nothing to play: don't keep calling play() on it
+media.p2.srcObject = null; media.p2.paused = true; media.p2.plays = 0;
+tokens[1].document.x = 10; Hooks.callAll("refreshToken", { document: tokens[1].document, isOwner: false }, { refreshPosition: true }); await tick();
+{ const ok = media.p2.plays === 0; if (!ok) fails++; console.log((ok ? "ok  " : "FAIL") + " an element with no stream isn't play()ed"); }
+media.p2.srcObject = liveStream(); media.p2.paused = false; tokens[1].document.x = 0;
 // background tab: animated doc position stale, _source has destination
 document.hidden = true; tokens[1].document.x = 0; tokens[1].document._source.x = 3000;
 Hooks.callAll("canvasReady", canvas); await tick();

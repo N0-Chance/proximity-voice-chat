@@ -143,7 +143,20 @@
     margin-left: 0;
   }
 
-  /* Voice diagnostics window and chat card */
+  /* Voice diagnostics window and chat card. Foundry turns off text selection on the whole page, so turn it back on */
+  .pvc-report,
+  .pvc-report * {
+    user-select: text;
+  }
+
+  .pvc-report .pvc-details pre {
+    cursor: text;
+  }
+
+  .pvc-report .pvc-copy-details {
+    margin: 4px 0;
+  }
+
   .pvc-diagnostics-body {
     display: flex;
     flex-direction: column;

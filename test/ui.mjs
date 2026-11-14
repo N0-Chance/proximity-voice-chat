@@ -621,8 +621,19 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   check("a player's own view hides the name of a token they can't see", win.report.peers.find(p => p.id === "p2").reason.includes("you can't see") && !JSON.stringify(win.report).includes('"bob\\"'), win.report.peers.find(p => p.id === "p2").reason);
   check("...and is marked as redacted", win.report.redacted === true);
   const buttons = win.content.querySelectorAll("button").map(b => b.dataset.action).join(",");
-  check("the player's window offers Run Again, Copy Report and Send to GM", buttons === "rerun,copy,send", buttons);
+  check("the player's window offers Run Again, Copy Report and Send to GM", buttons === "copyDetails,rerun,copy,send", buttons);
   tokens[1].visible = true;
+
+  await win.click("copyDetails");
+  check("Copy Details puts the full technical data on the clipboard", JSON.parse(copied.at(-1)).peers.length === win.report.peers.length);
+  // the GM's browser is connected but sends no audio, like a recording client without a microphone
+  game.webrtc.client.peers = new Map([["gm", { _pc: { connectionState: "connected", iceConnectionState: "connected", getStats: async () => new Map() } }]]);
+  await win.click("rerun");
+  const silent = win.report.peers.find(p => p.id === "gm");
+  check("a user sending no audio (no microphone, like a recording client) isn't flagged as paused",
+    silent.sendingAudio === false && silent.problem === null && allText(win.content.querySelectorAll("tr").find(r => r.dataset.userId === "gm")).includes("Peer.NotSending"));
+  game.webrtc.client.peers = undefined;
+  await win.click("rerun");
 
   await win.click("copy");
   check("Copy Report puts a readable text report on the clipboard", copied.at(-1)?.includes("proximity-voice-chat.Diagnostics.Text.Heading") && copied.at(-1).includes("- Bob:"), copied.at(-1));
@@ -664,7 +675,7 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   check("the card escapes the player's name", card.content.includes("&lt;b&gt;Alice&lt;/b&gt;") && !card.content.includes("<b>Alice"), card.content);
   check("the report window opens for the GM who asked", windows.length === windowsBefore + 1 && windows.at(-1).remote === true);
   const remoteButtons = windows.at(-1).content.querySelectorAll("button").map(b => b.dataset.action).join(",");
-  check("a received report offers Copy and Request Again, not Run Again or Send", remoteButtons === "copy,request", remoteButtons);
+  check("a received report offers Copy and Request Again, not Run Again or Send", remoteButtons === "copyDetails,copy,request", remoteButtons);
 
   // a report another GM asked for is posted by that GM, not this one
   const createdBefore = created.length;

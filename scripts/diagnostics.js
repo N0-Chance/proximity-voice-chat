@@ -11,7 +11,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "1.6.2";
+export const DIAG_SCRIPT_VERSION = "1.6.3";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -59,6 +59,7 @@ export function peer_status(peer) {
   if (peer.problem === "no-audio-element") return { level: "warn", text: L("Peer.NoAudioElement") };
   if (peer.problem === "paused") return { level: "warn", text: L("Peer.Paused") };
   if (peer.muted) return { level: "info", text: L("Peer.Muted") };
+  if (peer.connected && peer.sendingAudio === false) return { level: "info", text: L("Peer.NotSending") };
   if (peer.volume > 0) return { level: "ok", text: L("Peer.Hear") + (peer.route?.startsWith("relayed") ? " " + L("Peer.Relayed") : "") };
   return { level: "info", text: F("Peer.CantHear", { reason: peer.reason }) };
 }
@@ -74,6 +75,7 @@ export function summary(report) {
   const bad_self = self_issues(report.self).some(issue => issue.level === "bad");
   if (bad_self || broken) return { level: "bad", text: F("Summary.Problems", { connected, total: report.peers.length }) };
   if (!report.peers.length) return { level: "info", text: L("Summary.Alone") };
+  if (report.peers.some(peer => peer_status(peer).level === "warn")) return { level: "warn", text: F("Summary.Warnings", { connected, total: report.peers.length }) };
   return { level: "ok", text: F("Summary.Working", { connected, total: report.peers.length }) };
 }
 
@@ -167,7 +169,11 @@ export function render_report(report) {
   root.append(facts);
 
   const details = el("details", "pvc-details");
-  details.append(el("summary", "", L("Details")), el("pre", "", JSON.stringify(report, null, 2)));
+  const copy = el("button", "pvc-copy-details");
+  copy.type = "button";
+  copy.dataset.action = "copyDetails";
+  copy.append(el("i", "fa-solid fa-copy"), document.createTextNode(" " + L("Button.CopyDetails")));
+  details.append(el("summary", "", L("Details")), copy, el("pre", "", JSON.stringify(report, null, 2)));
   root.append(details);
   return root;
 }
@@ -293,6 +299,7 @@ export function register_diagnostics() {
       actions: {
         rerun: VoiceDiagnostics.#onRerun,
         copy: VoiceDiagnostics.#onCopy,
+        copyDetails: VoiceDiagnostics.#onCopyDetails,
         send: VoiceDiagnostics.#onSend,
         request: VoiceDiagnostics.#onRequest
       }
@@ -339,6 +346,11 @@ export function register_diagnostics() {
     static async #onCopy() {
       await game.clipboard.copyPlainText(report_text(this.report));
       ui.notifications.info(L("Copied"));
+    }
+
+    static async #onCopyDetails() {
+      await game.clipboard.copyPlainText(JSON.stringify(this.report, null, 2));
+      ui.notifications.info(L("CopiedDetails"));
     }
 
     static async #onSend() {

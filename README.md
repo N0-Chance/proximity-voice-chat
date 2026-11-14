@@ -84,10 +84,11 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
 ## Troubleshooting
 **Voice Diagnostics** shows, in plain language, whether your voice chat is working and why not. Open it from **Configure Settings → Proximity Voice Chat → Voice Diagnostics**, or right-click yourself in the players list.
 - **The summary** at the top says how many players you're connected to and lists any problems with your own browser, with the fix.
-- **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed.
+- **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed. A user who sends no audio at all, such as a recording client without a microphone, is shown as such rather than as a fault.
 - **Buttons:**
   - **Run Again**
   - **Copy Report**, plain text for Discord
+  - **Copy Details**, the full technical data, in the Details section
   - **Send to GM**
 - **For GMs:** right-click any player and choose **Request Voice Diagnostics**. Their browser runs it and sends the report back, and they see a short notice that you did. Reports arrive as chat cards whispered to the GMs, with a button that opens the full report, and they stay in the chat log for later.
 - **Privacy:** a player's own window hides the names of tokens they can't see, and other players' voice modes unless they can hear them. Reports sent to GMs keep full detail. The GM's browser posts the card, because a player could otherwise read their own whispered report in their chat log.

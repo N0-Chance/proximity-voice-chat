@@ -124,5 +124,9 @@
   "proximity-voice-chat.Diagnostics.Button.Request": "Request Again",
   "proximity-voice-chat.Diagnostics.Card.Title": "Voice diagnostics from {name}",
   "proximity-voice-chat.Diagnostics.Card.Open": "Open Report",
-  "proximity-voice-chat.Diagnostics.Text.Heading": "Voice diagnostics from {name}, {time}"
+  "proximity-voice-chat.Diagnostics.Text.Heading": "Voice diagnostics from {name}, {time}",
+  "proximity-voice-chat.Diagnostics.Peer.NotSending": "Connected, but they aren't sending any audio (no microphone, or it's turned off).",
+  "proximity-voice-chat.Diagnostics.Summary.Warnings": "Mostly working: connected to {connected} of {total} players, with a warning below.",
+  "proximity-voice-chat.Diagnostics.Button.CopyDetails": "Copy Details",
+  "proximity-voice-chat.Diagnostics.CopiedDetails": "Diagnostic details copied to the clipboard."
 }

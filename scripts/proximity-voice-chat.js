@@ -7,7 +7,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.6.2";
+const SCRIPT_VERSION = "1.6.3";
 
 /**
  * The different types with which a radius can be measured
@@ -738,7 +738,8 @@ function _update_volumes() {
     const slider_volume = game.webrtc.settings.getUser(other_user.id)?.volume ?? 1;
     const volume = foundry.audio.AudioHelper.inputToVolume(foundry.audio.AudioHelper.volumeToInput(slider_volume) * multiplier);
     if (Math.abs(audio_element.volume - volume) > 0.001) audio_element.volume = volume;
-    if (audio_element.paused && volume > 0) {
+    // an element with no stream (e.g. a user with no microphone) has nothing to play, and play() would only fail
+    if (audio_element.paused && volume > 0 && audio_element.srcObject) {
       // Chrome can pause a media element whose volume goes from 0 back up, so resume it
       audio_element.play()?.catch((err) => {
         if (debug) console.warn(MODULE_ID + " | could not resume audio for " + other_user.name, err);
@@ -1438,12 +1439,15 @@ export async function collect_diagnostics({ redact = false } = {}) {
     const peer = game.webrtc?.client?.peers?.get(user.id);
     const state = peer?._pc?.connectionState ?? null;
     const connected = state === "connected";
+    // a user with no microphone (or with audio input off, like a recording client) sends no audio tracks at all;
+    // their element stays paused because there's nothing to play, which isn't a fault
+    const sending_audio = tracks.some(track => track.readyState === "live");
     let problem = null;
     if (own.problem === "no-addresses" || own.problem === "webrtc-disabled") problem = "own-browser";
     else if (!peer) problem = "no-connection";
     else if (!connected) problem = "not-established";
     else if (!element) problem = "no-audio-element";
-    else if (element.paused) problem = "paused";
+    else if (sending_audio && element.paused) problem = "paused";
     return {
       id: user.id,
       name: user.name,
@@ -1455,6 +1459,7 @@ export async function collect_diagnostics({ redact = false } = {}) {
       route: routes[index],
       problem,
       voiceMode: redact && !(volume > 0) ? null : get_voice_mode(user),
+      sendingAudio: sending_audio,
       muted: !!settings?.muted,
       audioBlocked: settings ? !settings.canBroadcastAudio : false,
       volume: Number(volume.toFixed(2)),
