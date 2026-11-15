@@ -83,8 +83,9 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
 
 ## Troubleshooting
 **Voice Diagnostics** shows, in plain language, whether your voice chat is working and why not. Open it from **Configure Settings → Proximity Voice Chat → Voice Diagnostics**, or right-click yourself in the players list.
-- **The summary** at the top says how many players you're connected to and lists any problems with your own browser, with the fix.
-- **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed. A user who sends no audio at all, such as a recording client without a microphone, is shown as such rather than as a fault.
+- **The summary** at the top says how many players you're connected to and lists any problems with your own browser, with the fix. That includes whether your microphone is really capturing and, if not, why: blocked by the browser, turned off in Foundry, or a device that isn't connected. Foundry alone just calls all of these "muted". It also covers push-to-talk, and whether "Fix Voice Connection Drops" is off.
+- **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed, and checks audio in **both directions**: whether theirs reaches you, and whether yours reaches them. A user who sends no audio at all, such as a recording client without a microphone, is shown as such rather than as a fault.
+- **Hidden users:** if you've hidden someone (Foundry's "Hide User"), their row says so and offers **Show Again**. A GM viewing a player's report gets **Ask to Show Again**, which makes that player's browser show them again, with a notice to the player.
 - **Buttons:**
   - **Run Again**
   - **Copy Report**, plain text for Discord
@@ -108,6 +109,7 @@ game.modules.get("proximity-voice-chat").api.diagnose()
 
 It prints one row per other user. Each row shows their current volume and why, whether your voice connection to them really finished, and whether it runs **direct** or **relayed**. It also shows the state of their audio. Above the table, it lists your relay server and the types of network address your browser offers.
 
+- **You can hear someone but they can't hear you** (or the other way round): the one who can't hear has probably hidden the other. Foundry then connects but plays none of their audio, and with the camera dock hidden that's invisible. Right-click the person in the players list and choose **Show User**, or use **Show Again** in Voice Diagnostics.
 - **A red "old cached copy" error:** the browser is running a stale script. Clear the site's cached files and reload; in Chrome, open F12, right-click reload, and choose **Empty Cache and Hard Reload**.
 - **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a TURN relay server (for example coturn) and enter it in Foundry's audio/video settings under **Relay Server → Custom**. The URL must start with `turn:`. Foundry sends it to every player automatically.
 - **Firefox won't connect at all:** check `about:config`. `media.peerconnection.enabled` must be true, and `media.peerconnection.ice.no_host`, `.default_address_only`, `.relay_only`, and `.proxy_only` must be false.

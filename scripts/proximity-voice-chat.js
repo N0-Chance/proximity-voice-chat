@@ -7,7 +7,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.6.3";
+const SCRIPT_VERSION = "1.6.4";
 
 /**
  * The different types with which a radius can be measured
@@ -1396,6 +1396,40 @@ function _can_see_token(uuid) {
  *   voice modes unless they can hear them. Reports sent to a GM are collected without redaction.
  * @returns {Promise<object>}
  */
+/**
+ * What this browser's microphone is actually doing. Foundry reports "muted" both for a muted microphone and for
+ * one that isn't capturing at all, which hides the real cause.
+ * @returns {Promise<object>}
+ */
+async function _microphone_state() {
+  const client = game.webrtc?.client;
+  const local = client?.localStream ?? client?.getMediaStreamForUser?.(game.user.id) ?? null;
+  const track = local?.getAudioTracks?.()[0] ?? null;
+  let permission = "unknown";
+  try {
+    permission = (await navigator.permissions?.query({ name: "microphone" }))?.state ?? "unknown";
+  } catch {
+    // not every browser can be asked about the microphone permission
+  }
+  const device = game.webrtc?.settings?.client?.audioSrc ?? null;
+  let devices = null;
+  try {
+    devices = await client?.getAudioSources?.() ?? null;
+  } catch {
+    devices = null;
+  }
+  return {
+    capturing: track?.readyState === "live",
+    trackEnabled: track ? track.enabled : null,
+    permission,
+    device,
+    deviceLabel: devices?.[device] ?? null,
+    deviceFound: device === "default" || device === "disabled" || !devices ? null : Object.hasOwn(devices, device),
+    activation: game.webrtc?.settings?.client?.voice?.mode ?? null,
+    transmitting: !!game.webrtc?.broadcasting
+  };
+}
+
 export async function collect_diagnostics({ redact = false } = {}) {
   const listeners = globalThis.canvas?.ready ? _get_listener_positions() : [];
   const relay = _custom_relay();
@@ -1417,6 +1451,8 @@ export async function collect_diagnostics({ redact = false } = {}) {
     globalSpeaker: is_global_speaker(game.user),
     voiceMode: get_voice_mode(game.user),
     micMuted: !!me?.muted,
+    mic: await _microphone_state(),
+    connectionFix: !!game.settings.get(MODULE_ID, "fixPeerConnections"),
     deafened: !!game.webrtc?.settings?.client?.muteAll,
     listeningThrough: globalThis.canvas?.ready ? _get_listener_tokens().map(token => token.name) : [],
     speakingThrough: Array.from(_token_proximity_data.values()).filter(data => data.userlist.includes(game.user.uuid)).map(data => data.name),
@@ -1429,7 +1465,8 @@ export async function collect_diagnostics({ redact = false } = {}) {
   const routes = await Promise.all(users.map(user => _peer_route(game.webrtc?.client?.peers?.get(user.id))));
   const peers = users.map((user, index) => {
     const element = _get_audio_element(user.id);
-    const stream = element?.srcObject;
+    // what they send us, from the incoming stream itself: Foundry only creates an audio element for users it shows
+    const stream = game.webrtc?.client?.getMediaStreamForUser?.(user.id) ?? element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
     let { volume, reason, token } = _calculate_user_volume(user, listeners);
@@ -1441,13 +1478,19 @@ export async function collect_diagnostics({ redact = false } = {}) {
     const connected = state === "connected";
     // a user with no microphone (or with audio input off, like a recording client) sends no audio tracks at all;
     // their element stays paused because there's nothing to play, which isn't a fault
-    const sending_audio = tracks.some(track => track.readyState === "live");
+    const receiving_audio = tracks.some(track => track.readyState === "live");
+    // and what we send them: our outgoing audio on this connection, if the browser exposes it
+    const senders = typeof peer?._pc?.getSenders === "function" ? peer._pc.getSenders() : null;
+    const sending_audio = senders ? senders.some(sender => sender.track?.kind === "audio" && sender.track.readyState === "live") : null;
+    // "Hide User" on a camera tile: Foundry then plays none of their audio, and with the dock hidden it's invisible
+    const hidden = !!settings?.blocked;
     let problem = null;
     if (own.problem === "no-addresses" || own.problem === "webrtc-disabled") problem = "own-browser";
     else if (!peer) problem = "no-connection";
     else if (!connected) problem = "not-established";
-    else if (!element) problem = "no-audio-element";
-    else if (sending_audio && element.paused) problem = "paused";
+    else if (hidden) problem = "hidden";
+    else if (receiving_audio && !element) problem = "no-audio-element";
+    else if (receiving_audio && element.paused) problem = "paused";
     return {
       id: user.id,
       name: user.name,
@@ -1459,6 +1502,8 @@ export async function collect_diagnostics({ redact = false } = {}) {
       route: routes[index],
       problem,
       voiceMode: redact && !(volume > 0) ? null : get_voice_mode(user),
+      hidden,
+      receivingAudio: receiving_audio,
       sendingAudio: sending_audio,
       muted: !!settings?.muted,
       audioBlocked: settings ? !settings.canBroadcastAudio : false,
@@ -1479,6 +1524,7 @@ const _PROBLEM_TEXT = {
   "own-browser": "YOUR BROWSER can't make voice connections; see yourAddressProblem above",
   "no-connection": "NO VOICE CONNECTION to this user (not even an attempt)",
   "not-established": "voice connection not established; look for 'ICE failed' or SimplePeer errors",
+  "hidden": "you've hidden this user (camera dock or players list), so their audio doesn't play",
   "no-audio-element": "connected but no audio element",
   "paused": "audio element paused"
 };
@@ -1507,13 +1553,18 @@ export async function diagnose() {
     deafenedAll: self.deafened,
     relayServer: self.relay ?? "none (Foundry's default: no relay)",
     yourAddresses: self.webrtcSupported ? Object.entries(self.addresses).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled",
-    yourAddressProblem: self.addressProblem ?? "none"
+    yourAddressProblem: self.addressProblem ?? "none",
+    yourMicrophone: self.mic,
+    connectionFix: self.connectionFix
   });
   const rows = peers.map(peer => ({
     user: peer.name,
     connected: peer.connected,
     problem: peer.problem ? _PROBLEM_TEXT[peer.problem] + (peer.problem === "not-established" ? " (" + (peer.connectionState ?? "unknown") + ")" : "") : "none",
     voiceMode: peer.voiceMode,
+    hidden: peer.hidden,
+    receivingAudio: peer.receivingAudio,
+    sendingAudio: peer.sendingAudio,
     connection: peer.connectionState === null ? "none" : peer.connectionState + "/" + peer.iceState + (peer.weCalled ? " (we called)" : " (they called)"),
     route: peer.route,
     mutedOrBlocked: peer.muted || peer.audioBlocked,

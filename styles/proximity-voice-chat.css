@@ -204,6 +204,14 @@
     word-break: break-all;
   }
 
+  .pvc-report .pvc-unhide {
+    margin-left: 6px;
+    padding: 0 6px;
+    height: 1.6em;
+    min-height: 0;
+    display: inline-flex;
+  }
+
   .pvc-diagnostics-buttons {
     display: flex;
     gap: 6px;

@@ -128,5 +128,17 @@
   "proximity-voice-chat.Diagnostics.Peer.NotSending": "Connected, but they aren't sending any audio (no microphone, or it's turned off).",
   "proximity-voice-chat.Diagnostics.Summary.Warnings": "Mostly working: connected to {connected} of {total} players, with a warning below.",
   "proximity-voice-chat.Diagnostics.Button.CopyDetails": "Copy Details",
-  "proximity-voice-chat.Diagnostics.CopiedDetails": "Diagnostic details copied to the clipboard."
+  "proximity-voice-chat.Diagnostics.CopiedDetails": "Diagnostic details copied to the clipboard.",
+  "proximity-voice-chat.Diagnostics.Mic.Off": "Your microphone is turned off in Foundry's audio/video settings (Configure Audio/Video → Devices).",
+  "proximity-voice-chat.Diagnostics.Mic.Denied": "Your browser is blocking the microphone for this site. Allow it via the icon left of the address bar, then reload.",
+  "proximity-voice-chat.Diagnostics.Mic.Missing": "The microphone selected in Foundry's audio/video settings isn't connected. Pick another in Configure Audio/Video → Devices.",
+  "proximity-voice-chat.Diagnostics.Mic.NotCapturing": "Your microphone isn't capturing any audio, so nobody can hear you. Check Configure Audio/Video → Devices, and that no other app has taken over the microphone.",
+  "proximity-voice-chat.Diagnostics.Mic.PushToTalk": "You're on push-to-talk: others hear you only while you hold the key.",
+  "proximity-voice-chat.Diagnostics.FixOff": "\"Fix Voice Connection Drops\" is off (Configure Settings → Proximity Voice Chat). Connections that are slow to set up may keep failing.",
+  "proximity-voice-chat.Diagnostics.Peer.Hidden": "You've hidden them (\"Hide User\"), so their audio doesn't play.",
+  "proximity-voice-chat.Diagnostics.Peer.NotReachingThem": "Your audio isn't reaching them; try reloading.",
+  "proximity-voice-chat.Diagnostics.Button.Unhide": "Show Again",
+  "proximity-voice-chat.Diagnostics.Button.RemoteUnhide": "Ask to Show Again",
+  "proximity-voice-chat.Diagnostics.AskedUnhide": "Asked {player}'s browser to show {name} again.",
+  "proximity-voice-chat.Diagnostics.Unhidden": "{gm} (GM) showed {name} again in your voice chat; you had hidden them, so you couldn't hear them."
 }

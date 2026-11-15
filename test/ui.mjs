@@ -149,13 +149,15 @@ const mkToken = (id, x, y, userlist, owner) => {
 const tokens = [mkToken("alice", 0, 0, "User.p1", "p1"), mkToken("bob", 300, 0, "User.p2", "p2")];
 const scene = { tokens: tokens.map(t => t.document), grid: { size: 100 }, flags: {}, getFlag(m, k) { return this.flags[k]; } };
 tokens.forEach(t => t.document.parent = scene);
-const streams = { p1: { id: "s1", getAudioTracks: () => [{}] }, p2: { id: "s2", getAudioTracks: () => [{}] }, gm: { id: "sg", getAudioTracks: () => [{}] } };
+const liveTrack = () => ({ kind: "audio", enabled: true, readyState: "live", muted: false });
+const streams = { p1: { id: "s1", getAudioTracks: () => [liveTrack()] }, p2: { id: "s2", getAudioTracks: () => [liveTrack()] }, gm: { id: "sg", getAudioTracks: () => [liveTrack()] } };
 const levelReports = new Map();
 let levelReportsWork = true;
 const media = {};
 const rtc = {
   world: { mode: 1 }, client: { users: {}, muteAll: false, voice: { activityThreshold: -45 } }, activity: {},
-  getUser: id => ({ volume: rtc.client.users[id]?.volume ?? 1, muted: !!rtc.client.users[id]?.muted, canBroadcastAudio: !users.find(u => u.id === id)?.blockedAudio }),
+  getUser: id => ({ volume: rtc.client.users[id]?.volume ?? 1, muted: !!rtc.client.users[id]?.muted, blocked: !!rtc.client.users[id]?.blocked,
+    canBroadcastAudio: !users.find(u => u.id === id)?.blockedAudio }),
   set: async (scope, key, value) => {
     const path = key.split("."); let o = rtc[scope];
     for (const p of path.slice(0, -1)) o = o[p] ??= {};
@@ -193,10 +195,12 @@ const emitted = [];
 const receive = message => socketHandlers.forEach(fn => fn(message));
 globalThis.canvas = { interface: new Container(), ready: true, scene, level: { id: "L1" }, tokens: { controlled: [], ownedTokens: [], placeables: tokens }, app: { ticker: { add: f => tickers.add(f), remove: f => tickers.delete(f) } } };
 const notices = [];
-globalThis.ui = { webrtc: { getUserVideoElement: id => media[id] ??= { volume: 1, paused: false, play() {} } }, notifications: { info: m => notices.push(m), warn: m => notices.push("WARN " + m), error: m => notices.push("ERROR " + m) } };
+globalThis.ui = { webrtc: { render() {}, getUserVideoElement: id => media[id] ??= { volume: 1, paused: false, play() {} } }, notifications: { info: m => notices.push(m), warn: m => notices.push("WARN " + m), error: m => notices.push("ERROR " + m) } };
 globalThis.fromUuid = async () => null;
 
-await import(process.argv[2] ?? new URL("../scripts/proximity-voice-chat.js", import.meta.url).href);
+const mainScript = process.argv[2] ?? new URL("../scripts/proximity-voice-chat.js", import.meta.url).href;
+await import(mainScript);
+const { self_issues } = await import(new URL("./diagnostics.js", mainScript.startsWith("file:") ? mainScript : "file://" + mainScript).href);
 Hooks.callAll("init"); Hooks.callAll("i18nInit");
 await new Promise(r => setTimeout(r, 0));
 
@@ -628,11 +632,53 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   check("Copy Details puts the full technical data on the clipboard", JSON.parse(copied.at(-1)).peers.length === win.report.peers.length);
   // the GM's browser is connected but sends no audio, like a recording client without a microphone
   game.webrtc.client.peers = new Map([["gm", { _pc: { connectionState: "connected", iceConnectionState: "connected", getStats: async () => new Map() } }]]);
+  const gmStream = streams.gm; streams.gm = { id: "sg", getAudioTracks: () => [] };
   await win.click("rerun");
   const silent = win.report.peers.find(p => p.id === "gm");
+  streams.gm = gmStream;
   check("a user sending no audio (no microphone, like a recording client) isn't flagged as paused",
-    silent.sendingAudio === false && silent.problem === null && allText(win.content.querySelectorAll("tr").find(r => r.dataset.userId === "gm")).includes("Peer.NotSending"));
-  game.webrtc.client.peers = undefined;
+    silent.receivingAudio === false && silent.problem === null && allText(win.content.querySelectorAll("tr").find(r => r.dataset.userId === "gm")).includes("Peer.NotSending"));
+  // --- 1.6.4: hidden users, your microphone's real state, and audio in both directions
+  const connectedPeer = (senders = [{ track: liveTrack() }]) => ({ _pc: { connectionState: "connected", iceConnectionState: "connected", getStats: async () => new Map(), getSenders: () => senders } });
+  game.webrtc.client.localStream = { getAudioTracks: () => [liveTrack()] };
+  game.webrtc.client.peers = new Map([["p2", connectedPeer()], ["gm", connectedPeer()]]);
+  rtc.client.users.p2 = { ...(rtc.client.users.p2 ?? {}), blocked: true };
+  await win.click("rerun");
+  const hiddenRow = win.content.querySelectorAll("tr").find(r => r.dataset.userId === "p2");
+  check("a user you've hidden is called out, not 'no audio player'", win.report.peers.find(p => p.id === "p2").problem === "hidden" && allText(hiddenRow).includes("Peer.Hidden"), allText(hiddenRow));
+  const showAgain = hiddenRow.querySelector('button[data-action="unhide"]');
+  check("...with a Show Again button", !!showAgain && showAgain.dataset.userId === "p2");
+  await win.options.actions.unhide.call(win, {}, showAgain); await tick();
+  check("Show Again undoes Hide User in this browser", rtc.client.users.p2.blocked === false && win.report.peers.find(p => p.id === "p2").problem !== "hidden");
+
+  // your microphone: capturing, or why not
+  const issues = () => self_issues(win.report.self).map(i => i.text).join(" | ");
+  check("a capturing microphone raises no microphone warning", !issues().includes("Mic."), issues());
+  game.webrtc.client.localStream = { getAudioTracks: () => [] };
+  await win.click("rerun");
+  check("a microphone that isn't capturing says so, instead of 'muted'", issues().includes("Mic.NotCapturing") && !issues().includes("MicMuted"), issues());
+  rtc.client.audioSrc = "disabled"; await win.click("rerun");
+  check("...and names the cause when the microphone is turned off in Foundry", issues().includes("Mic.Off"), issues());
+  rtc.client.audioSrc = "default";
+  Object.defineProperty(navigator, "permissions", { value: { query: async () => ({ state: "denied" }) }, configurable: true });
+  await win.click("rerun");
+  check("...or blocked by the browser", issues().includes("Mic.Denied") && win.report.self.mic.permission === "denied", issues());
+  delete navigator.permissions;
+  game.webrtc.client.localStream = { getAudioTracks: () => [liveTrack()] };
+  rtc.client.voice.mode = "ptt"; game.webrtc.broadcasting = false;
+  await win.click("rerun");
+  check("push-to-talk while not holding the key is explained", issues().includes("Mic.PushToTalk"), issues());
+  rtc.client.voice.mode = "always"; game.webrtc.broadcasting = true;
+  settings.fixPeerConnections = false; await win.click("rerun");
+  check("'Fix Voice Connection Drops' being off is flagged", issues().includes("FixOff"), issues());
+  settings.fixPeerConnections = true;
+
+  // audio in both directions: connected, your mic works, but nothing of yours goes out on this connection
+  game.webrtc.client.peers.set("p2", connectedPeer([]));
+  await win.click("rerun");
+  const outRow = win.content.querySelectorAll("tr").find(r => r.dataset.userId === "p2");
+  check("audio not reaching them is a warning on their row", outRow.className.includes("pvc-warn") && allText(outRow).includes("Peer.NotReachingThem"), allText(outRow));
+  game.webrtc.client.peers = undefined; game.webrtc.client.localStream = undefined;
   await win.click("rerun");
 
   await win.click("copy");
@@ -692,6 +738,35 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   const fromCard = windows.length;
   await open.dispatch("click"); await tick();
   check("the chat card's Open Report button opens the stored report", windows.length === fromCard + 1 && windows.at(-1).report === report);
+}
+
+// --- a GM viewing a player's report can ask that player's browser to show someone again
+{
+  becomeUser("gm"); renderPlayers();
+  const report = {
+    at: Date.now(), redacted: false,
+    self: { id: "p1", name: "Alice", foundry: "14.369", module: "x", scripts: "x", voiceActive: true, voiceMode: "normal", listeningThrough: [], speakingThrough: [], addresses: { host: 1 }, webrtcSupported: true, mic: { capturing: true }, connectionFix: true },
+    peers: [{ id: "p2", name: "Bob", connected: true, problem: "hidden", hidden: true, receivingAudio: true, sendingAudio: true, volume: 1, route: "direct", reason: "" }]
+  };
+  const html = new El("div"); const open = new El("button"); open.className = "pvc-open-report"; html.append(open);
+  Hooks.callAll("renderChatMessageHTML", { getFlag: (m, k) => (k === "report" ? report : undefined) }, html);
+  await open.dispatch("click"); await tick();
+  const win = windows.at(-1);
+  const ask = win.content.querySelectorAll("button").find(b => b.dataset.action === "remoteUnhide");
+  check("a GM viewing a player's report gets Ask to Show Again for someone they've hidden", !!ask && ask.dataset.userId === "p2");
+  const sentBefore = emitted.length;
+  win.options.actions.remoteUnhide.call(win, {}, ask);
+  check("...which asks that player's browser", emitted.slice(sentBefore).some(m => m.action === "diagnostics-unhide" && m.to === "p1" && m.user === "p2" && m.from === "gm"));
+
+  becomeUser("p1");
+  rtc.client.users.p2 = { ...(rtc.client.users.p2 ?? {}), blocked: true };
+  receive({ action: "diagnostics-unhide", from: "p2", to: "p1", user: "p2" }); await tick();
+  check("only a GM can make a player's browser show someone again", rtc.client.users.p2.blocked === true);
+  const before = notices.length, replyBefore = emitted.length;
+  receive({ action: "diagnostics-unhide", from: "gm", to: "p1", user: "p2" }); await tick(); await tick();
+  check("the player's browser shows them again", rtc.client.users.p2.blocked === false);
+  check("...tells the player why", notices.slice(before).some(n => n.includes("proximity-voice-chat.Diagnostics.Unhidden")), notices.slice(before).join(" | "));
+  check("...and sends the GM a fresh report", emitted.slice(replyBefore).some(m => m.action === "diagnostics-report" && m.to === "gm"));
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");

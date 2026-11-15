@@ -11,7 +11,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "1.6.3";
+export const DIAG_SCRIPT_VERSION = "1.6.4";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -43,23 +43,52 @@ export function self_issues(self) {
     issues.push({ level: "warn", text: game.i18n.localize("proximity-voice-chat.SelfTest.relay-unreachable") });
   }
   if (self.deafened) issues.push({ level: "warn", text: L("Deafened") });
-  if (self.micMuted) issues.push({ level: "info", text: L("MicMuted") });
+  const mic = self.mic;
+  if (mic && self.voiceActive && !mic.capturing) {
+    // Foundry calls all of these "muted"; say which it actually is
+    if (mic.device === "disabled") issues.push({ level: "bad", text: L("Mic.Off") });
+    else if (mic.permission === "denied") issues.push({ level: "bad", text: L("Mic.Denied") });
+    else if (mic.deviceFound === false) issues.push({ level: "bad", text: L("Mic.Missing") });
+    else issues.push({ level: "bad", text: L("Mic.NotCapturing") });
+  } else if (self.micMuted) {
+    issues.push({ level: "info", text: L("MicMuted") });
+  } else if (mic?.activation === "ptt" && !mic.transmitting) {
+    issues.push({ level: "info", text: L("Mic.PushToTalk") });
+  }
+  if (self.connectionFix === false) issues.push({ level: "warn", text: L("FixOff") });
   return issues;
 }
 
+const SEVERITY = { ok: 0, info: 1, warn: 2, bad: 3 };
+
 /**
- * One other user's status, in plain language
+ * One other user's status, in plain language: whether you hear them, and whether your audio reaches them
  * @param {object} peer an entry of the report's peers
+ * @param {object} [self] the report's self section, for whether your own microphone is capturing
  * @returns {{level: string, text: string}} level: "ok", "info", "warn" or "bad"
  */
-export function peer_status(peer) {
+export function peer_status(peer, self) {
+  const incoming = _incoming_status(peer);
+  // your microphone works, the connection is up, but no audio of yours is going out on it
+  if (peer.connected && self?.mic?.capturing && peer.sendingAudio === false) {
+    const outgoing = { level: "warn", text: L("Peer.NotReachingThem") };
+    const worst = SEVERITY[outgoing.level] > SEVERITY[incoming.level] ? outgoing : incoming;
+    return { level: worst.level, text: incoming.text + " " + outgoing.text };
+  }
+  return incoming;
+}
+
+function _incoming_status(peer) {
   if (peer.problem === "own-browser") return { level: "bad", text: L("Peer.OwnBrowser") };
   if (peer.problem === "no-connection") return { level: "bad", text: L("Peer.NoConnection") };
   if (peer.problem === "not-established") return { level: "bad", text: F("Peer.NotEstablished", { state: peer.connectionState ?? "?" }) };
+  if (peer.problem === "hidden") return { level: "warn", text: L("Peer.Hidden") };
   if (peer.problem === "no-audio-element") return { level: "warn", text: L("Peer.NoAudioElement") };
   if (peer.problem === "paused") return { level: "warn", text: L("Peer.Paused") };
   if (peer.muted) return { level: "info", text: L("Peer.Muted") };
-  if (peer.connected && peer.sendingAudio === false) return { level: "info", text: L("Peer.NotSending") };
+  // older reports (1.6.3) called incoming audio "sendingAudio"
+  const receiving = peer.receivingAudio ?? peer.sendingAudio;
+  if (peer.connected && receiving === false) return { level: "info", text: L("Peer.NotSending") };
   if (peer.volume > 0) return { level: "ok", text: L("Peer.Hear") + (peer.route?.startsWith("relayed") ? " " + L("Peer.Relayed") : "") };
   return { level: "info", text: F("Peer.CantHear", { reason: peer.reason }) };
 }
@@ -71,11 +100,11 @@ export function peer_status(peer) {
  */
 export function summary(report) {
   const connected = report.peers.filter(peer => peer.connected).length;
-  const broken = report.peers.filter(peer => peer_status(peer).level === "bad").length;
+  const broken = report.peers.filter(peer => peer_status(peer, report.self).level === "bad").length;
   const bad_self = self_issues(report.self).some(issue => issue.level === "bad");
   if (bad_self || broken) return { level: "bad", text: F("Summary.Problems", { connected, total: report.peers.length }) };
   if (!report.peers.length) return { level: "info", text: L("Summary.Alone") };
-  if (report.peers.some(peer => peer_status(peer).level === "warn")) return { level: "warn", text: F("Summary.Warnings", { connected, total: report.peers.length }) };
+  if (report.peers.some(peer => peer_status(peer, report.self).level === "warn")) return { level: "warn", text: F("Summary.Warnings", { connected, total: report.peers.length }) };
   return { level: "ok", text: F("Summary.Working", { connected, total: report.peers.length }) };
 }
 
@@ -91,11 +120,14 @@ export function report_text(report) {
     summary(report).text,
     ...self_issues(self).map(issue => "! " + issue.text),
     "",
-    ...report.peers.map(peer => "- " + peer.name + ": " + peer_status(peer).text + " [" + (peer.route ?? "?") + "]"),
+    ...report.peers.map(peer => "- " + peer.name + ": " + peer_status(peer, self).text + " [" + (peer.route ?? "?") + "]"),
     "",
     "Foundry " + self.foundry + ", module " + self.module + " (scripts " + self.scripts + ")",
     "Relay: " + (self.relay ?? "none") + "; your addresses: "
       + (self.webrtcSupported ? Object.entries(self.addresses).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled"),
+    "Microphone: " + (self.mic ? (self.mic.capturing ? "capturing" : "NOT capturing") + ", permission " + self.mic.permission
+      + ", device " + (self.mic.deviceLabel ?? self.mic.device ?? "?") + ", " + (self.mic.activation ?? "?") : "unknown"),
+    "Fix Voice Connection Drops: " + (self.connectionFix === undefined ? "unknown" : self.connectionFix ? "on" : "OFF"),
     "Browser: " + self.browser
   ];
   return lines.join("\n");
@@ -134,9 +166,12 @@ function status_line(level, text) {
 /**
  * Builds the report's contents
  * @param {object} report
+ * @param {object} [options]
+ * @param {"own" | "remote" | null} [options.unhide] which Show Again button hidden users get: "own" changes this
+ *   browser's setting, "remote" asks the reporting player's browser to (GMs only)
  * @returns {HTMLElement}
  */
-export function render_report(report) {
+export function render_report(report, { unhide = null } = {}) {
   const root = el("div", "pvc-report");
   const verdict = summary(report);
   root.append(status_line(verdict.level, verdict.text));
@@ -148,11 +183,19 @@ export function render_report(report) {
     for (const key of ["Player", "Status", "Route"]) head.append(el("th", "", L("Column." + key)));
     table.append(head);
     for (const peer of report.peers) {
-      const status = peer_status(peer);
+      const status = peer_status(peer, report.self);
       const row = el("tr", "pvc-" + status.level);
       row.dataset.userId = peer.id;
       const cell = el("td");
       cell.append(el("i", LEVEL_ICONS[status.level]), document.createTextNode(" " + status.text));
+      if (peer.problem === "hidden" && unhide) {
+        const show = el("button", "pvc-unhide");
+        show.type = "button";
+        show.dataset.action = unhide === "own" ? "unhide" : "remoteUnhide";
+        show.dataset.userId = peer.id;
+        show.append(el("i", "fa-solid fa-eye"), document.createTextNode(" " + L(unhide === "own" ? "Button.Unhide" : "Button.RemoteUnhide")));
+        cell.append(show);
+      }
       row.append(el("td", "", peer.name + (peer.isGM ? " [GM]" : "")), cell, el("td", "", peer.route ?? "?"));
       table.append(row);
     }
@@ -230,6 +273,15 @@ async function send_report(to = null) {
 }
 
 /**
+ * Undoes "Hide User" for someone in this browser, so their audio plays again
+ * @param {string} user_id
+ */
+async function show_user(user_id) {
+  await game.webrtc.settings.set("client", `users.${user_id}.blocked`, false);
+  ui.webrtc?.render();
+}
+
+/**
  * Asks a player's browser to run diagnostics and send the report back
  * @param {foundry.documents.User} user
  */
@@ -244,6 +296,12 @@ export function request_diagnostics(user) {
 }
 
 async function on_message(message) {
+  // a GM asking this browser to show someone it has hidden; only GMs may ask
+  if (message?.action === "diagnostics-unhide" && message.to === game.user.id && game.users.get(message.from)?.isGM) {
+    await show_user(message.user);
+    ui.notifications.info(F("Unhidden", { gm: game.users.get(message.from)?.name ?? "GM", name: game.users.get(message.user)?.name ?? "?" }));
+    await send_report(message.from);
+  }
   if (message?.action === "diagnostics-request" && message.to === game.user.id) {
     ui.notifications.info(F("RanByGM", { name: game.users.get(message.from)?.name ?? "GM" }));
     await send_report(message.from);
@@ -301,7 +359,9 @@ export function register_diagnostics() {
         copy: VoiceDiagnostics.#onCopy,
         copyDetails: VoiceDiagnostics.#onCopyDetails,
         send: VoiceDiagnostics.#onSend,
-        request: VoiceDiagnostics.#onRequest
+        request: VoiceDiagnostics.#onRequest,
+        unhide: VoiceDiagnostics.#onUnhide,
+        remoteUnhide: VoiceDiagnostics.#onRemoteUnhide
       }
     };
 
@@ -317,7 +377,8 @@ export function register_diagnostics() {
 
     async _renderHTML(_context, _options) {
       const body = el("div", "pvc-diagnostics-body");
-      body.append(render_report(this.report));
+      const unhide = !this.remote ? "own" : (game.user.isGM && game.users.get(this.report.self.id)?.active ? "remote" : null);
+      body.append(render_report(this.report, { unhide }));
       const buttons = el("div", "pvc-diagnostics-buttons");
       const button = (action, icon, label) => {
         const b = el("button");
@@ -356,6 +417,19 @@ export function register_diagnostics() {
     static async #onSend() {
       const sent = await send_report(null);
       ui.notifications[sent ? "info" : "warn"](L(sent ? "Sent" : "NoGM"));
+    }
+
+    static async #onUnhide(_event, target) {
+      await show_user(target.dataset.userId);
+      this.report = null;
+      await this.render();
+    }
+
+    static #onRemoteUnhide(_event, target) {
+      const player = game.users.get(this.report.self.id);
+      const hidden = game.users.get(target.dataset.userId);
+      game.socket.emit(SOCKET, { action: "diagnostics-unhide", from: game.user.id, to: player.id, user: hidden?.id });
+      ui.notifications.info(F("AskedUnhide", { player: player.name, name: hidden?.name ?? "?" }));
     }
 
     static #onRequest() {
