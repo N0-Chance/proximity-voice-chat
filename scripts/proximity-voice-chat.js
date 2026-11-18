@@ -7,7 +7,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "1.6.4";
+const SCRIPT_VERSION = "1.6.5";
 
 /**
  * The different types with which a radius can be measured
@@ -410,6 +410,7 @@ Hooks.on("init", async () => {
     set_scene_disabled,
     is_global_listener,
     is_global_speaker,
+    run_relay_test,
     VOICE_MODES,
     get_voice_mode,
     set_voice_mode,
@@ -913,6 +914,8 @@ Hooks.on("rtcSettingsChanged", (_settings, _changed) => {
 const _PEER_SETUP_TIMEOUT_MS = 30000;
 const _PEER_STARTED = Symbol("proximity-voice-chat.started");
 const _PEER_REMOTE_FINGERPRINT = Symbol("proximity-voice-chat.remoteFingerprint");
+/** Relay server errors a voice connection reported while gathering addresses */
+const _PEER_RELAY_ERRORS = Symbol("proximity-voice-chat.relayErrors");
 /** Set on a SimplePeerAVClient once connect() has finished, i.e. its socket listeners are up and it can take calls */
 const _CLIENT_READY = Symbol("proximity-voice-chat.clientReady");
 const _LAST_CALL_REQUEST = Symbol("proximity-voice-chat.lastCallRequest");
@@ -975,9 +978,11 @@ async function _gather_own_addresses(timeout = 6000) {
   const PeerConnection = globalThis.RTCPeerConnection;
   if (!PeerConnection) return { supported: false, types: {} };
   const types = {};
+  const errors = [];
   let connection;
   try {
     connection = new PeerConnection({ iceServers: _ice_servers() });
+    _watch_relay_errors(connection, errors);
     connection.createDataChannel("proximity-voice-chat-self-test");
     const gathered = new Promise((resolve) => {
       const timer = setTimeout(resolve, timeout);
@@ -998,7 +1003,7 @@ async function _gather_own_addresses(timeout = 6000) {
   } finally {
     connection?.close();
   }
-  return { supported: true, types };
+  return { supported: true, types, relayError: _relay_error(errors, !!types.relay) };
 }
 
 /**
@@ -1029,35 +1034,248 @@ async function _run_self_test({ relay_changed = false } = {}) {
   if (problem === "webrtc-disabled" || problem === "no-addresses") {
     ui.notifications.error("proximity-voice-chat.SelfTest." + problem, { localize: true, permanent: true });
   } else if (problem === "relay-unreachable" && game.user.isGM) {
-    ui.notifications.warn("proximity-voice-chat.SelfTest.relay-unreachable", { localize: true, permanent: true });
+    ui.notifications.warn(_relay_unreachable_text(result.relayError), { permanent: true });
   } else if (!problem && relay_changed && game.user.isGM && _custom_relay()) {
     ui.notifications.info("proximity-voice-chat.SelfTest.relay-ok", { localize: true });
   }
-  if (problem) console.warn(MODULE_ID + " | connection self-test: " + problem, result.types);
+  if (problem) console.warn(MODULE_ID + " | connection self-test: " + problem, result.types, result.relayError ?? "");
+  // a relay address alone doesn't prove the relay carries anything, so players also test a real relayed path
+  if (!problem && _custom_relay() && !game.user.isGM) await run_relay_test();
   _report_self_test();
 }
 
 function _report_self_test() {
   if (!_self_test || game.user.isGM) return;
-  game.socket?.emit(_SOCKET, { action: "voice-self-test", from: game.user?.id ?? game.userId, problem: _self_test.problem, types: _self_test.types });
+  game.socket?.emit(_SOCKET, {
+    action: "voice-self-test", from: game.user?.id ?? game.userId, problem: _self_test.problem, types: _self_test.types,
+    relayError: _self_test.relayError ?? null, relayTest: _relay_test
+  });
+}
+
+/** The last self-test problem and relay test result each user reported, so a GM isn't shown the same notice twice */
+const _reported_problems = new Map();
+const _reported_relay = new Map();
+
+/**
+ * Shows a GM another user's failed self-test or relay test, by name, with what to do about it
+ * @param {{from: string, problem: string | null, relayError?: object, relayTest?: object}} message
+ */
+function _on_self_test_report(message) {
+  if (!game.user.isGM) return;
+  const user = game.users.get(message.from);
+  const previous = _reported_problems.get(message.from) ?? null;
+  _reported_problems.set(message.from, message.problem ?? null);
+  if (user && message.problem && message.problem !== previous) {
+    const text = message.problem === "relay-unreachable"
+      ? game.i18n.format("proximity-voice-chat.SelfTest.Player.relay-unreachable", { name: user.name }) + _relay_reason_suffix(message.relayError)
+      : game.i18n.format("proximity-voice-chat.SelfTest.Player." + message.problem, { name: user.name });
+    ui.notifications[message.problem === "relay-unreachable" ? "warn" : "error"](text, { permanent: true });
+  }
+  const status = message.relayTest?.status ?? null;
+  const previous_status = _reported_relay.get(message.from) ?? null;
+  _reported_relay.set(message.from, status);
+  if (user && (status === "no-allocation" || status === "no-route") && status !== previous_status) {
+    const text = game.i18n.format("proximity-voice-chat.RelayTest.Player." + status, { name: user.name }) + _relay_reason_suffix(message.relayTest.error);
+    ui.notifications.warn(text, { permanent: true });
+  }
+}
+
+/* -------------------------------------------- */
+/*  Relay errors and the pairwise relay test    */
+/* -------------------------------------------- */
+
+/** What relay (TURN) server error codes mean */
+const _RELAY_ERRORS = { 401: "credentials", 403: "forbidden", 486: "full", 508: "capacity", 701: "unreachable" };
+
+/** Most telling first: a full or overloaded relay, then a login or permission problem, then the rest */
+const _RELAY_ERROR_PRIORITY = [486, 508, 401, 403];
+
+/**
+ * Records relay server errors a connection reports while gathering addresses ("icecandidateerror"). The relay's own
+ * log may not show them (coturn doesn't log 486 at its default verbosity), so the browser is often the only witness.
+ * Only errors from turn: URLs count; STUN failures are normal on some networks.
+ * @param {RTCPeerConnection} connection
+ * @param {Array<object>} errors collected into
+ */
+function _watch_relay_errors(connection, errors) {
+  const handler = (event) => {
+    if (!/^turns?:/.test(String(event.url ?? ""))) return;
+    errors.push({ code: event.errorCode, text: event.errorText ?? "", url: event.url });
+  };
+  if (typeof connection?.addEventListener === "function") connection.addEventListener("icecandidateerror", handler);
 }
 
 /**
- * Shows a GM another user's failed self-test, by name, with what to do about it
- * @param {{from: string, problem: string | null}} message
+ * The most telling relay error, or null. Browsers report a 701 for every network interface that can't reach the relay,
+ * so once any relay address came through, these errors don't mean anything is wrong.
+ * @param {Array<{code: number, text: string, url: string}>} errors
+ * @param {boolean} got_relay
+ * @returns {{code: number, reason: string, text: string} | null}
  */
-/** The last self-test problem each user reported, so a GM isn't shown the same notice on every reload */
-const _reported_problems = new Map();
+function _relay_error(errors, got_relay) {
+  if (got_relay || !errors.length) return null;
+  const pick = _RELAY_ERROR_PRIORITY.map(code => errors.find(e => e.code === code)).find(Boolean)
+    ?? errors.find(e => e.code !== 701) ?? errors[0];
+  return { code: pick.code, reason: _RELAY_ERRORS[pick.code] ?? "other", text: pick.text };
+}
 
-function _on_self_test_report(message) {
-  if (!game.user.isGM) return;
-  const previous = _reported_problems.get(message.from) ?? null;
-  _reported_problems.set(message.from, message.problem ?? null);
-  if (!message.problem || message.problem === previous) return;
-  const user = game.users.get(message.from);
-  if (!user) return;
-  const notify = message.problem === "relay-unreachable" ? "warn" : "error";
-  ui.notifications[notify](game.i18n.format("proximity-voice-chat.SelfTest.Player." + message.problem, { name: user.name }), { permanent: true });
+/**
+ * " (relay server is full, error 486)" and the like, for appending to a notice
+ * @param {{code: number, reason: string, text: string} | null | undefined} error
+ * @returns {string}
+ */
+function _relay_reason_suffix(error) {
+  if (!error) return "";
+  return " " + game.i18n.format("proximity-voice-chat.RelayTest.Because", {
+    reason: game.i18n.localize("proximity-voice-chat.RelayTest.Reason." + error.reason), code: error.code
+  });
+}
+
+function _relay_unreachable_text(error) {
+  return game.i18n.localize("proximity-voice-chat.SelfTest.relay-unreachable") + _relay_reason_suffix(error);
+}
+
+const _sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Resolves once a connection has finished gathering its addresses, or after the timeout
+ * @param {RTCPeerConnection} connection
+ * @param {number} timeout
+ */
+function _gathered(connection, timeout) {
+  return new Promise((resolve) => {
+    if (connection.iceGatheringState === "complete") return resolve();
+    const timer = setTimeout(resolve, timeout);
+    connection.addEventListener("icegatheringstatechange", () => {
+      if (connection.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    connection.addEventListener("icecandidate", (event) => {
+      if (!event.candidate) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+}
+
+const _RELAY_TEST_TIMEOUTS = { gather: 5000, answer: 10000, open: 10000, ping: 3000 };
+const _RELAY_TEST_PINGS = 3;
+
+/**
+ * The latest relay test result for this browser
+ * @type {{status: string, rttMs?: number, error?: object | null, at: number} | null}
+ */
+let _relay_test = null;
+
+/** Answers this player is waiting for from the GM's browser, by test ID */
+const _pending_relay_answers = new Map();
+
+/**
+ * Tests the relay end to end: a throwaway data connection from this (player's) browser to the GM's browser, where
+ * this side may only use the relay and the GM's side may use anything. That's the path real relayed voice takes:
+ * through the relay's port forwards and outbound NAT to the GM's public address. A relay address alone (the
+ * self-test) doesn't show traffic gets through, and a test inside one browser would pass without exercising those.
+ * Status: "ok", "no-allocation" (no relay slot), "no-route" (a slot, but nothing gets through), "no-answer" (the GM's
+ * browser didn't respond: inconclusive), "no-gm", "is-gm" (GMs aren't tested against themselves), "error".
+ * @param {Partial<typeof _RELAY_TEST_TIMEOUTS>} [timeouts]
+ * @returns {Promise<object | null>}
+ */
+export async function run_relay_test(timeouts = {}) {
+  const limits = { ..._RELAY_TEST_TIMEOUTS, ...timeouts };
+  const PeerConnection = globalThis.RTCPeerConnection;
+  if (!_custom_relay() || !PeerConnection) return (_relay_test = null);
+  if (game.user.isGM) return (_relay_test = { status: "is-gm", at: Date.now() });
+  const gm = game.users.activeGM;
+  if (!gm) return (_relay_test = { status: "no-gm", at: Date.now() });
+
+  const id = foundry.utils?.randomID?.() ?? Math.random().toString(36).slice(2);
+  const errors = [];
+  let got_relay = false;
+  let connection = null;
+  const finish = (status, extra = {}) => {
+    connection?.close();
+    _pending_relay_answers.delete(id);
+    const error = status === "ok" ? null : _relay_error(errors, got_relay);
+    _relay_test = { status, ...extra, error, at: Date.now() };
+    if (status !== "ok") console.warn(MODULE_ID + " | relay test: " + status, error ?? "");
+    return _relay_test;
+  };
+  try {
+    connection = new PeerConnection({ iceServers: _ice_servers(), iceTransportPolicy: "relay" });
+    _watch_relay_errors(connection, errors);
+    connection.addEventListener("icecandidate", (event) => {
+      const type = event.candidate?.type ?? event.candidate?.candidate?.match(/ typ (\w+)/)?.[1];
+      if (type === "relay") got_relay = true;
+    });
+    const channel = connection.createDataChannel("proximity-voice-chat-relay-test");
+    const opened = new Promise(resolve => { channel.onopen = () => resolve(true); });
+    await connection.setLocalDescription(await connection.createOffer());
+    await _gathered(connection, limits.gather);
+    if (!got_relay) return finish("no-allocation");
+
+    const answered = new Promise((resolve) => {
+      _pending_relay_answers.set(id, resolve);
+      setTimeout(() => resolve(null), limits.answer);
+    });
+    game.socket.emit(_SOCKET, { action: "relay-test-offer", from: game.user.id, to: gm.id, id, sdp: connection.localDescription.sdp });
+    const sdp = await answered;
+    if (!sdp) return finish("no-answer");
+    await connection.setRemoteDescription({ type: "answer", sdp });
+    if (!(await Promise.race([opened, _sleep(limits.open).then(() => false)]))) return finish("no-route");
+
+    const rtts = [];
+    for (let n = 0; n < _RELAY_TEST_PINGS; n++) {
+      const started = performance.now();
+      const pong = new Promise(resolve => { channel.onmessage = (event) => { if (event.data === "pong:" + n) resolve(true); }; });
+      channel.send("ping:" + n);
+      if (!(await Promise.race([pong, _sleep(limits.ping).then(() => false)]))) return finish("no-route");
+      rtts.push(performance.now() - started);
+    }
+    return finish("ok", { rttMs: Math.round(rtts.reduce((sum, rtt) => sum + rtt, 0) / rtts.length) });
+  } catch (err) {
+    console.warn(MODULE_ID + " | relay test failed", err);
+    return finish("error");
+  }
+}
+
+/**
+ * The GM's side of a relay test: answer the player's offer and echo their pings. It gathers its public address with
+ * plain STUN rather than reserving a relay slot of its own, so the relayed hop is the player's.
+ * @param {{from: string, to: string, id: string, sdp: string}} message
+ */
+async function _answer_relay_test(message) {
+  const PeerConnection = globalThis.RTCPeerConnection;
+  if (!game.user.isGM || message.to !== game.user.id || !PeerConnection) return;
+  const connection = new PeerConnection({ iceServers: globalThis.SimplePeer?.config?.iceServers ?? [{ urls: "stun:stun.l.google.com:19302" }] });
+  connection.addEventListener("datachannel", (event) => {
+    const channel = event.channel;
+    channel.onmessage = (incoming) => {
+      if (typeof incoming.data === "string" && incoming.data.startsWith("ping:")) channel.send("pong:" + incoming.data.slice(5));
+    };
+  });
+  setTimeout(() => connection.close(), 30000);
+  try {
+    await connection.setRemoteDescription({ type: "offer", sdp: message.sdp });
+    await connection.setLocalDescription(await connection.createAnswer());
+    await _gathered(connection, _RELAY_TEST_TIMEOUTS.gather);
+    game.socket.emit(_SOCKET, { action: "relay-test-answer", from: game.user.id, to: message.from, id: message.id, sdp: connection.localDescription.sdp });
+  } catch (err) {
+    console.warn(MODULE_ID + " | could not answer a relay test", err);
+    connection.close();
+  }
+}
+
+/**
+ * A relay test that couldn't run or reach the GM gets another go, e.g. once a GM has loaded
+ * @returns {Promise<void>}
+ */
+async function _retest_relay_if_needed() {
+  if (game.user.isGM || !_self_test || _self_test.problem || !_custom_relay()) return;
+  if (_relay_test && !["no-gm", "no-answer", "error"].includes(_relay_test.status)) return;
+  await run_relay_test();
 }
 
 Hooks.on("rtcSettingsChanged", (_settings, changed) => {
@@ -1097,8 +1315,10 @@ Hooks.once("ready", () => {
   game.socket.on(_SOCKET, (message) => {
     if (message?.action === "call-me" && message.to === game.userId) _on_call_request?.(message.from);
     if (message?.action === "voice-self-test") _on_self_test_report(message);
-    // a GM who loads later asks everyone for their self-test results
-    if (message?.action === "voice-self-test-request") _report_self_test();
+    // a GM who loads later asks everyone for their self-test results; a relay test that was waiting for a GM runs now
+    if (message?.action === "voice-self-test-request") _retest_relay_if_needed().then(_report_self_test);
+    if (message?.action === "relay-test-offer") _answer_relay_test(message);
+    if (message?.action === "relay-test-answer" && message.to === game.userId) _pending_relay_answers.get(message.id)?.(message.sdp);
     if (message?.action === "voice-mode") _apply_voice_mode(message.from, message.mode);
     // someone who just loaded asks for everyone's mode; only non-Normal modes need an answer
     if (message?.action === "voice-mode-request" && get_voice_mode(game.user) !== VOICE_MODES.NORMAL) {
@@ -1168,6 +1388,7 @@ function _patch_simplepeer() {
   proto.connectPeer = function (userId, isInitiator = false) {
     const peer = original_connect_peer.call(this, userId, isInitiator);
     peer[_PEER_STARTED] = Date.now();
+    _watch_relay_errors(peer._pc, peer[_PEER_RELAY_ERRORS] = []);
     // only let the peer that is currently registered for this user act on Foundry's behalf
     for (const event of ["stream", "close", "error"]) {
       const listeners = peer.listeners(event);
@@ -1459,7 +1680,9 @@ export async function collect_diagnostics({ redact = false } = {}) {
     relay: relay ? relay.url : null,
     webrtcSupported: own.supported,
     addresses: own.types,
-    addressProblem: own.problem
+    addressProblem: own.problem,
+    relayError: own.relayError ?? null,
+    relayTest: _relay_test
   };
   const users = game.users.filter(user => user.active && !user.isSelf);
   const routes = await Promise.all(users.map(user => _peer_route(game.webrtc?.client?.peers?.get(user.id))));
@@ -1503,6 +1726,8 @@ export async function collect_diagnostics({ redact = false } = {}) {
       problem,
       voiceMode: redact && !(volume > 0) ? null : get_voice_mode(user),
       hidden,
+      // only worth showing for a connection that never came up
+      relayError: connected ? null : _relay_error(peer?.[_PEER_RELAY_ERRORS] ?? [], false),
       receivingAudio: receiving_audio,
       sendingAudio: sending_audio,
       muted: !!settings?.muted,

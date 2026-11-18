@@ -228,6 +228,7 @@ const speak = async (id, db) => { levelReports.get("proximity-voice-chat." + id)
 function becomeUser(id) {
   users.forEach(u => u.isSelf = u.id === id);
   game.user = game.users.get(id);
+  game.userId = id;
   canvas.tokens.ownedTokens = tokens.filter(t => game.user.isGM || t.owner === id);
   canvas.tokens.controlled = [];
   Hooks.callAll("canvasReady", canvas);
@@ -566,7 +567,7 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   const rows = await game.modules.get("proximity-voice-chat").api.diagnose();
   check("diagnose blames this browser, not the connection", rows.every(r => r.problem.startsWith("YOUR BROWSER")), rows.map(r => r.problem).join(" | "));
   const afterReport = emitted.length;
-  receive({ action: "voice-self-test-request", from: "gm" });
+  receive({ action: "voice-self-test-request", from: "gm" }); await tick();
   check("a GM loading later gets the result when they ask", emitted.slice(afterReport).some(m => m.action === "voice-self-test" && m.problem === "no-addresses"));
 
   // the GM's side: a named notice for the failing player
@@ -767,6 +768,125 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   check("the player's browser shows them again", rtc.client.users.p2.blocked === false);
   check("...tells the player why", notices.slice(before).some(n => n.includes("proximity-voice-chat.Diagnostics.Unhidden")), notices.slice(before).join(" | "));
   check("...and sends the GM a fresh report", emitted.slice(replyBefore).some(m => m.action === "diagnostics-report" && m.to === "gm"));
+}
+
+// --- end-to-end relay test: a relay-only connection from a player's browser to the GM's, over a simulated network
+{
+  const net = { relayOK: true, routeOK: true, errors: [], pcs: [] };
+  class NetChannel {
+    constructor(pc) { this.pc = pc; }
+    send(data) { setTimeout(() => this.peer?.onmessage?.({ data }), 1); }
+  }
+  class NetPeerConnection {
+    constructor(config = {}) { this.config = config; this.listeners = {}; this.iceGatheringState = "new"; net.pcs.push(this); this.id = net.pcs.length; }
+    addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+    emit(type, event) { (this.listeners[type] ?? []).forEach(fn => fn(event)); this["on" + type]?.(event); }
+    createDataChannel() { this.channel = new NetChannel(this); return this.channel; }
+    async createOffer() { return { type: "offer", sdp: "offer:" + this.id }; }
+    async createAnswer() { return { type: "answer", sdp: "answer:" + this.id }; }
+    async setLocalDescription(description) { this.localDescription = description; setTimeout(() => this.gather(), 0); }
+    gather() {
+      const usesRelay = (this.config.iceServers ?? []).some(server => /^turns?:/.test(String(server.urls)));
+      if (this.config.iceTransportPolicy === "relay") {
+        if (usesRelay && net.relayOK) this.emit("icecandidate", { candidate: { type: "relay" } });
+        else for (const error of net.errors) this.emit("icecandidateerror", error);
+      } else {
+        this.emit("icecandidate", { candidate: { type: "host" } });
+        this.emit("icecandidate", { candidate: { type: "srflx" } });
+      }
+      this.iceGatheringState = "complete";
+      this.emit("icecandidate", { candidate: null });
+    }
+    async setRemoteDescription(description) {
+      this.remoteDescription = description;
+      if (description.type !== "answer") return;
+      const far_end = net.pcs.find(pc => pc.localDescription?.sdp === description.sdp);
+      if (!far_end || !net.routeOK || !this.channel) return;// a relay slot, but nothing gets through
+      const remote = new NetChannel(far_end);
+      this.channel.peer = remote; remote.peer = this.channel;
+      setTimeout(() => { far_end.emit("datachannel", { channel: remote }); this.channel.onopen?.(); }, 0);
+    }
+    close() { this.closed = true; }
+  }
+  globalThis.RTCPeerConnection = NetPeerConnection;
+  const api = game.modules.get("proximity-voice-chat").api;
+  const quick = { gather: 100, answer: 300, open: 150, ping: 150 };
+  const settle = (ms = 30) => new Promise(r => setTimeout(r, ms));
+  rtc.world.turn = { type: "custom", url: "turn:turn.askew.us:3478", username: "u", password: "p" };
+  game.users.activeGM = users[0];
+
+  /** runs a relay test as Alice, delivering the socket messages between her browser and the GM's like the server would */
+  async function relayTest({ deliverAnswer = true } = {}) {
+    becomeUser("p1");
+    const from = emitted.length;
+    const running = api.run_relay_test(quick);
+    await settle();
+    const offer = emitted.slice(from).find(m => m.action === "relay-test-offer");
+    if (offer && deliverAnswer) {
+      becomeUser("gm"); receive(offer); await settle();
+      const answer = emitted.slice(from).find(m => m.action === "relay-test-answer");
+      becomeUser("p1"); if (answer) receive(answer);
+    }
+    return { result: await running, offer };
+  }
+
+  let { result, offer } = await relayTest();
+  check("the relay test offers a connection to the active GM", offer?.to === "gm" && offer.from === "p1");
+  check("Alice's side may only use the relay", net.pcs.find(pc => pc.localDescription?.sdp === offer.sdp)?.config.iceTransportPolicy === "relay");
+  const gmSide = net.pcs.find(pc => pc.localDescription?.type === "answer");
+  check("the GM's side doesn't reserve a relay slot of its own", !(gmSide?.config.iceServers ?? []).some(server => /^turns?:/.test(String(server.urls))));
+  check("a working relay path passes, with a round-trip time", result.status === "ok" && typeof result.rttMs === "number", JSON.stringify(result));
+  check("the test connections are closed afterwards", net.pcs.filter(pc => pc.config.iceTransportPolicy === "relay").every(pc => pc.closed));
+
+  net.relayOK = false;
+  net.errors = [
+    { errorCode: 701, errorText: "", url: "turn:turn.askew.us:3478?transport=udp" },
+    { errorCode: 486, errorText: "Allocation Bandwidth Quota Reached", url: "turn:turn.askew.us:3478" },
+    { errorCode: 701, errorText: "", url: "stun:stun.l.google.com:19302" }
+  ];
+  ({ result } = await relayTest());
+  check("no relay slot: the test says so and names the relay's error, 486 over the 701s", result.status === "no-allocation" && result.error?.code === 486 && result.error.reason === "full", JSON.stringify(result));
+  net.errors = [{ errorCode: 701, errorText: "", url: "stun:stun.l.google.com:19302" }];
+  ({ result } = await relayTest());
+  check("STUN errors aren't blamed on the relay", result.status === "no-allocation" && result.error === null, JSON.stringify(result));
+  net.relayOK = true; net.errors = [];
+
+  net.routeOK = false;
+  ({ result } = await relayTest());
+  check("a relay slot that carries nothing fails as no-route (the game-day failure)", result.status === "no-route", JSON.stringify(result));
+  net.routeOK = true;
+
+  ({ result } = await relayTest({ deliverAnswer: false }));
+  check("no answer from the GM's browser is inconclusive, not a failure", result.status === "no-answer");
+  game.users.activeGM = null;
+  ({ result } = await relayTest());
+  check("with no GM online, the test waits", result.status === "no-gm");
+  game.users.activeGM = users[0];
+  becomeUser("gm");
+  check("GMs aren't tested against themselves", (await api.run_relay_test(quick)).status === "is-gm");
+
+  // the GM hears about a player's failing relay path, once, by name
+  const before = notices.length;
+  receive({ action: "voice-self-test", from: "p2", problem: null, types: { host: 1, relay: 1 }, relayTest: { status: "no-route", error: null } });
+  check("the GM is told by name when a player's relay path carries nothing", notices.slice(before).some(n => n.startsWith("WARN proximity-voice-chat.RelayTest.Player.no-route") && n.includes("Bob")), notices.slice(before).join(" | "));
+  const again = notices.length;
+  receive({ action: "voice-self-test", from: "p2", problem: null, types: { host: 1, relay: 1 }, relayTest: { status: "no-route", error: null } });
+  check("...and only once", notices.length === again);
+  receive({ action: "voice-self-test", from: "p2", problem: null, types: { host: 1, relay: 1 }, relayTest: { status: "no-allocation", error: { code: 486, reason: "full", text: "" } } });
+  check("a relay that's full names the cause", notices.at(-1).includes("RelayTest.Player.no-allocation") && notices.at(-1).includes("RelayTest.Because") && notices.at(-1).includes("486"), notices.at(-1));
+
+  // and it shows in Voice Diagnostics
+  becomeUser("p1");
+  await relayTest();
+  const report = await api.collect_diagnostics();
+  const text = (await import(new URL("./diagnostics.js", mainScript.startsWith("file:") ? mainScript : "file://" + mainScript).href)).report_text(report);
+  check("diagnostics report the relay test and its round trip", text.includes("Relay test: ") && text.includes("Relay.ok"), text.split("\n").find(l => l.startsWith("Relay test")));
+  net.routeOK = false; await relayTest();
+  const failing = self_issues((await api.collect_diagnostics()).self).map(i => i.text).join(" | ");
+  check("a failing relay path is a warning in diagnostics", failing.includes("Diagnostics.Relay.no-route"), failing);
+  net.routeOK = true;
+  delete globalThis.RTCPeerConnection;
+  rtc.world.turn = { type: "server", url: "", username: "", password: "" };
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");

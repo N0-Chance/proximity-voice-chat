@@ -99,6 +99,8 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
 - The browser offers no network addresses at all, so nobody can connect to it. This is usually a Firefox privacy setting or a browser extension.
 - A relay server is configured but this browser can't reach it.
 
+**With a relay configured, each player's browser also tests the relay end to end.** It makes a small test connection to the GM's browser where the player's side may only use the relay, then sends a few test packets and times the round trip. Getting a relay address isn't enough: a relay can hand out addresses yet carry nothing, if its port forwards, outbound NAT or capacity are wrong. When the relay refuses a request, the browser's error code is shown in plain words: 486 "relay server is full", 508 "out of bandwidth capacity", 401 "username or password rejected", 701 "unreachable from this network". The relay's own log may not show these.
+
 Failures are reported to the GM by player name, so players don't need to watch their consoles. When a GM changes the relay settings, every browser re-checks, and the GM is told straight away whether the relay works.
 
 For the same data with more technical detail, run this in the browser console (F12):
@@ -173,7 +175,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
   - The problem: Foundry checks every 8 seconds and replaces any connection that hasn't fully finished setting up, on both ends at once, without closing the old one. A leftover connection that later fails then tears down its replacement.
   - The module's fix: only one side of each pair calls, a connection gets 30 seconds to finish, events from replaced connections are ignored, and a fresh offer from a reloaded browser replaces the old connection immediately.
   - A browser that loads or reloads asks the other side to call it over the module's socket. It reconnects in seconds, not after the next 8-second poll.
-- **A connection self-test in every browser**, reported to the GM.
+- **A connection self-test in every browser**, reported to the GM, plus an **end-to-end relay test** from each player to the GM, and relay error codes from the browser.
+  - Why the relay test: on a game day the relay handed out addresses but couldn't carry the table: it ran out of bandwidth capacity, refusing with 486s that its log didn't show. A check that only gets a relay address passed throughout.
   - Why: a browser that offers no network addresses, or can't reach the relay, fails silently. Speaking cues still light up, because Foundry's speaking signal travels over its server connection, so it looks like everything works except the audio.
 - **Deafen works.**
   - Why: Foundry 14.369's camera template reads `mutaAll` instead of `muteAll`, so its deafen button does nothing.
@@ -245,6 +248,7 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 * Hook `proximityVoiceModeChanged(user: User, mode: string)` fires on every client when anyone's mode changes
 
 ### Diagnostics
+* `run_relay_test(): Promise<object | null>`: tests the relay end to end from this (player's) browser to the active GM's. Its `status` is `ok` (with `rttMs`), `no-allocation`, `no-route`, `no-answer`, `no-gm`, `is-gm` or `error`, and `error` holds the relay's error code where there was one.
 * `collect_diagnostics({ redact?: boolean }): Promise<object>`: the report behind Voice Diagnostics: this browser's setup and one entry per other active user. `redact` hides what a player couldn't otherwise know.
 
 ### Voice state

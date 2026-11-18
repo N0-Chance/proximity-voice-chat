@@ -11,7 +11,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "1.6.4";
+export const DIAG_SCRIPT_VERSION = "1.6.5";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -40,7 +40,14 @@ export function self_issues(self) {
   if (self.addressProblem === "webrtc-disabled" || self.addressProblem === "no-addresses") {
     issues.push({ level: "bad", text: game.i18n.localize("proximity-voice-chat.SelfTest." + self.addressProblem) });
   } else if (self.addressProblem === "relay-unreachable") {
-    issues.push({ level: "warn", text: game.i18n.localize("proximity-voice-chat.SelfTest.relay-unreachable") });
+    issues.push({ level: "warn", text: game.i18n.localize("proximity-voice-chat.SelfTest.relay-unreachable") + reason_suffix(self.relayError) });
+  }
+  // the end-to-end relay test: only failures and inconclusive results need a line here; success is in the facts
+  const test = self.relayTest;
+  if (test && ["no-allocation", "no-route"].includes(test.status)) {
+    issues.push({ level: "warn", text: L("Relay." + test.status) + reason_suffix(test.error) });
+  } else if (test && ["no-answer", "error"].includes(test.status)) {
+    issues.push({ level: "info", text: L("Relay." + test.status) });
   }
   if (self.deafened) issues.push({ level: "warn", text: L("Deafened") });
   const mic = self.mic;
@@ -62,6 +69,29 @@ export function self_issues(self) {
 const SEVERITY = { ok: 0, info: 1, warn: 2, bad: 3 };
 
 /**
+ * " (the relay server is full, error 486)" and the like
+ * @param {{code: number, reason: string} | null | undefined} error
+ * @returns {string}
+ */
+function reason_suffix(error) {
+  if (!error) return "";
+  return " " + game.i18n.format("proximity-voice-chat.RelayTest.Because", {
+    reason: game.i18n.localize("proximity-voice-chat.RelayTest.Reason." + error.reason), code: error.code
+  });
+}
+
+/**
+ * The relay test result as a short phrase, e.g. "works (42 ms round trip)"
+ * @param {object | null | undefined} test
+ * @returns {string}
+ */
+function relay_test_text(test) {
+  if (!test) return L("Relay.untested");
+  if (test.status === "ok") return F("Relay.ok", { rtt: test.rttMs });
+  return L("Relay." + test.status) + reason_suffix(test.error);
+}
+
+/**
  * One other user's status, in plain language: whether you hear them, and whether your audio reaches them
  * @param {object} peer an entry of the report's peers
  * @param {object} [self] the report's self section, for whether your own microphone is capturing
@@ -81,7 +111,7 @@ export function peer_status(peer, self) {
 function _incoming_status(peer) {
   if (peer.problem === "own-browser") return { level: "bad", text: L("Peer.OwnBrowser") };
   if (peer.problem === "no-connection") return { level: "bad", text: L("Peer.NoConnection") };
-  if (peer.problem === "not-established") return { level: "bad", text: F("Peer.NotEstablished", { state: peer.connectionState ?? "?" }) };
+  if (peer.problem === "not-established") return { level: "bad", text: F("Peer.NotEstablished", { state: peer.connectionState ?? "?" }) + reason_suffix(peer.relayError) };
   if (peer.problem === "hidden") return { level: "warn", text: L("Peer.Hidden") };
   if (peer.problem === "no-audio-element") return { level: "warn", text: L("Peer.NoAudioElement") };
   if (peer.problem === "paused") return { level: "warn", text: L("Peer.Paused") };
@@ -125,6 +155,7 @@ export function report_text(report) {
     "Foundry " + self.foundry + ", module " + self.module + " (scripts " + self.scripts + ")",
     "Relay: " + (self.relay ?? "none") + "; your addresses: "
       + (self.webrtcSupported ? Object.entries(self.addresses).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled"),
+    "Relay test: " + (self.relay ? relay_test_text(self.relayTest) : "no relay configured"),
     "Microphone: " + (self.mic ? (self.mic.capturing ? "capturing" : "NOT capturing") + ", permission " + self.mic.permission
       + ", device " + (self.mic.deviceLabel ?? self.mic.device ?? "?") + ", " + (self.mic.activation ?? "?") : "unknown"),
     "Fix Voice Connection Drops: " + (self.connectionFix === undefined ? "unknown" : self.connectionFix ? "on" : "OFF"),
@@ -209,6 +240,7 @@ export function render_report(report, { unhide = null } = {}) {
   fact("Listening", self.listeningThrough.join(", ") || L("Nothing"));
   fact("Speaking", self.speakingThrough.join(", ") || L("Nothing"));
   fact("Relay", self.relay ?? L("NoRelay"));
+  if (self.relay) fact("RelayTest", relay_test_text(self.relayTest));
   root.append(facts);
 
   const details = el("details", "pvc-details");
@@ -400,6 +432,8 @@ export function register_diagnostics() {
     }
 
     static async #onRerun() {
+      // the relay test takes a few seconds, so it only re-runs when asked for, not for every report
+      await api().run_relay_test?.();
       this.report = null;
       await this.render();
     }
