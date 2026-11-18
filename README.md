@@ -3,6 +3,8 @@ Turns Foundry VTT's built-in voice chat into proximity voice chat: you hear othe
 
 This is a fork of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) (1.1.0) for Foundry v14, with fixes, GM narrator controls, and a replacement for the camera dock. Upstream has [a video showcase](https://www.youtube.com/watch?v=jV3ZPuTRQKw) of the original features.
 
+Differences from upstream (and why) can be found [here](#differences-from-upstream).
+
 ## Install
 In Foundry, choose **Install Module** and paste this manifest URL:
 
@@ -11,6 +13,8 @@ https://github.com/N0-Chance/proximity-voice-chat/releases/latest/download/modul
 ```
 
 Updates arrive through Foundry's own **Check for Updates**. Requires Foundry v14 with the built-in audio/video chat set to Audio Only or Audio/Video.
+
+**Be aware:** this addon is not a simple install-and-forget. It will most likely require a relay (TURN) server, which is no easy feat if you want to self-host. See [Relay (TURN) server](#relay-turn-server).
 
 ## How it works
 Each token has **speakers**: the users whose voice comes from it.
@@ -82,60 +86,15 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 The token's **Proximity** tab holds its speaker list, listen list, and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
 
 ## Relay (TURN) server
-**Why you may need one:** Foundry's voice chat is peer to peer, so every pair of players connects directly, and Foundry's default relay setting adds no relay at all. A pair behind strict routers, carrier-grade NAT or a firewall never connects, and their console shows `ICE failed, add a TURN server`. A self-hosted TURN relay fixes this. Players change nothing: Foundry sends the relay settings to every browser.
+**Why you may need one:** Foundry's voice chat is peer to peer, so every pair of players connects directly, and Foundry's default relay setting adds no relay at all. A pair behind strict routers, carrier-grade NAT or a firewall never connects, and their console shows `ICE failed, add a TURN server`. A self-hosted TURN relay fixes this, and players change nothing: Foundry sends the relay settings to every browser.
 
 **Connecting it to Foundry:** in **Configure Audio/Video → Server**, set **Relay Server** to **Custom**, then enter the URL (e.g. `turn:turn.example.com:3478`, starting with `turn:`), username and password.
-- Foundry accepts only one URL, and setting it replaces the browser's default STUN servers. coturn answers STUN on the same port, so direct connections are still tried first.
-- The username and password reach every player's browser, so treat them as public. The server has to be safe even when anyone has them.
+- Foundry accepts only one URL, and setting it replaces the browser's default STUN servers. A TURN server such as coturn also answers STUN, so direct connections are still tried first.
+- The username and password reach every player's browser, so treat them as public. The relay must be safe even when anyone has them, for example by refusing to relay to private addresses.
 
-**What we did** (coturn, self-hosted, audio only, a table of about 7):
-- **Port forwards** straight to the coturn host, not through a web proxy: 3478 over UDP and TCP, plus the relay port range over UDP.
-- **`external-ip=<public>/<private>`**, because coturn sits behind NAT, so it advertises its public address.
-- **A DNS record for the relay** that isn't proxied. On Cloudflare, use DNS only (grey cloud): its proxy can't carry TURN.
-- **Relaying to private and internal addresses blocked**, so the shared credentials can't be used to reach the LAN (see below).
+**Size it for the whole table.** Each browser opens a relay allocation per person it connects to, and sometimes one per network interface, so a 7-player table can need 80–100+ at once. A relay that can't hold that many still hands out addresses to whoever asks first, then refuses everyone else (error 486). That's what happened at my table's first game day. This module's self-test, end-to-end relay test and Voice Diagnostics will show it (see [Troubleshooting](#troubleshooting)).
 
-**What went wrong on our first game day:** the relay handed out addresses but couldn't serve the whole table.
-- **Allocations multiply.** Each browser opens one relay allocation per person it connects through the relay, so a table of *n* players can need about *n* × (*n* − 1) allocations: around 42 for 7. The module's relay test adds one per player for a few seconds.
-- **The cap came from capacity, not quotas.** coturn reserves `max-bps` for each allocation out of its total `bps-capacity`. So `bps-capacity` ÷ `max-bps` is the most allocations it will hold at once. We had 1,000,000 ÷ 32,000, about 31, so later connections were refused with **486 Allocation Bandwidth Quota Reached**.
-- **coturn doesn't log 486s at its default verbosity**, so a clean server log proved nothing. The module now shows these codes in Voice Diagnostics and in notices to the GM.
-- **Everyone shares one username**, so a per-user quota also caps the whole table.
-
-**Suggested settings** after our usage. Both `max-bps` and `bps-capacity` are in bytes per second:
-
-```
-listening-port=3478
-min-port=49160
-max-port=49459            # 300 relay ports: one per allocation, with headroom
-external-ip=<public-ip>/<private-ip>
-realm=turn.example.com
-lt-cred-mech
-user=<username>:<password>
-fingerprint
-no-multicast-peers
-no-tcp-relay
-no-cli
-max-bps=32000             # reserved per allocation
-bps-capacity=12000000     # 12,000,000 / 32,000 = 375 concurrent allocations
-user-quota=300            # everyone shares one username, so this is effectively the table's total
-total-quota=300
-denied-peer-ip=0.0.0.0-0.255.255.255
-denied-peer-ip=10.0.0.0-10.255.255.255
-denied-peer-ip=100.64.0.0-100.127.255.255
-denied-peer-ip=127.0.0.0-127.255.255.255
-denied-peer-ip=169.254.0.0-169.254.255.255
-denied-peer-ip=172.16.0.0-172.31.255.255
-denied-peer-ip=192.168.0.0-192.168.255.255
-denied-peer-ip=::1
-denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-```
-
-Size it so that **`max-port` − `min-port` and `bps-capacity` ÷ `max-bps` both comfortably exceed *n* × (*n* − 1)** for your largest table. The 100.64.0.0/10 line also blocks Tailscale addresses.
-
-**Testing it:**
-1. **On the server:** coturn's `turnutils_uclient` can hold many allocations at once (`-m <count>`). Run it at more than your table needs to confirm the server's capacity. We confirmed 60 and 200 concurrent allocations with no meaningful loss.
-2. **In Foundry:** save the relay settings again; every browser re-checks, and you're told whether the relay works. Each player's browser also runs the end-to-end relay test to your browser (see [Troubleshooting](#troubleshooting)).
-3. **In a session:** Voice Diagnostics shows each connection as **direct** or **relayed**.
+**What I did:** [RELAY.md](RELAY.md) records how I set up my own coturn relay for this module, and what I had to fix along the way: the config, the firewall and DNS, monitoring, testing, and the game-day capacity failure. It's a record of my setup, not a general guide to running a relay.
 
 ## Troubleshooting
 **Voice Diagnostics** shows, in plain language, whether your voice chat is working and why not. Open it from **Configure Settings → Proximity Voice Chat → Voice Diagnostics**, or right-click yourself in the players list.
@@ -175,6 +134,8 @@ It prints one row per other user. Each row shows their current volume and why, w
 
 ## Differences from upstream
 Compared with upstream 1.1.0, which was verified on Foundry 14.363.
+
+The upstream proof of concept (at the time of writing) was largely solid and well implemented (all credit to them), but actually using it showed a series of issues and friction that my group wanted resolved. My whole table was very interested in the concept, hoping that it would bring back the cross-talk and smaller roleplay moments that we had long missed from our in-person days. I am no programmer, just a passionate home-labber and power user, so I pointed Claude (Opus 5.5) at the problem (as you can see from the commits), and this repo is the result. Thus, the differences from upstream are largely down to our tastes and use case, along with a few fixes.
 
 ### Speaker and listen lists
 - **Tokens have a listen list**: users who hear through the token on top of their own.
