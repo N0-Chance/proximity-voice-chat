@@ -6,12 +6,18 @@
  * and the GM's browser posts the card, whispered to GMs. If the player's browser posted it, the player could read
  * the full report (hidden token names included) in their own chat log, since authors always see their whispers.
  *
+ * Requests that act on a player's browser (run diagnostics, show someone again) must come from a GM, and module socket
+ * messages can't prove that: Foundry doesn't tell listeners who sent one, so a "from" field is just a claim. Those
+ * requests are written as a flag on the player's own user record instead. The server only lets a GM (or the player
+ * themselves) write it, and the updateUser hook's userId is the server's record of who did. Reports still return over
+ * the socket, since user records are readable by everyone and reports can carry hidden token names.
+ *
  * Talks to proximity-voice-chat.js only through game.modules.get(MODULE_ID).api, at runtime.
  */
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "1.6.5";
+export const DIAG_SCRIPT_VERSION = "1.6.6";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -24,6 +30,22 @@ let VoiceDiagnostics = null;
 
 /** Requests this GM has sent and not yet had an answer to, by user ID */
 const _pending = new Map();
+
+/** GM request IDs this browser has acted on, so a request is only handled once */
+const _handled_requests = new Set();
+
+/**
+ * Writes a request onto a player's user record, where only a GM can put it (see the file comment). Every field is
+ * written each time: setFlag merges objects, so a field left out would keep its value from the previous request.
+ * @param {foundry.documents.User} user the player whose browser should act
+ * @param {"diagnose" | "unhide"} action
+ * @param {string | null} [target] for "unhide", the user to show again
+ * @returns {Promise}
+ */
+function write_gm_request(user, action, target = null) {
+  const id = foundry.utils?.randomID?.() ?? Math.random().toString(36).slice(2);
+  return user.setFlag(MODULE_ID, "gmRequest", { id, action, user: target });
+}
 
 /* -------------------------------------------- */
 /*  Verdicts                                    */
@@ -323,21 +345,37 @@ export function request_diagnostics(user) {
     _pending.delete(user.id);
     ui.notifications.warn(F("NoReply", { name: user.name }));
   }, REQUEST_TIMEOUT_MS));
-  game.socket.emit(SOCKET, { action: "diagnostics-request", from: game.user.id, to: user.id });
+  write_gm_request(user, "diagnose");
   ui.notifications.info(F("Requested", { name: user.name }));
 }
 
+/**
+ * Acts on a GM's request written to this player's user record, if the server says a GM wrote it
+ * @param {foundry.documents.User} user the updated user record
+ * @param {object} changed
+ * @param {object} _options
+ * @param {string} author_id the server's record of who made the update; the request's content is not trusted
+ */
+async function on_gm_request(user, changed, _options, author_id) {
+  if (!user.isSelf || !changed.flags?.[MODULE_ID]?.gmRequest) return;
+  // read the whole stored request: the diff only holds the fields that changed
+  const request = user.getFlag(MODULE_ID, "gmRequest");
+  const author = game.users.get(author_id);
+  if (!request?.id || !author?.isGM || _handled_requests.has(request.id)) return;
+  _handled_requests.add(request.id);
+  if (request.action === "unhide" && game.users.get(request.user)) {
+    await show_user(request.user);
+    ui.notifications.info(F("Unhidden", { gm: author.name, name: game.users.get(request.user).name }));
+  } else if (request.action === "diagnose") {
+    ui.notifications.info(F("RanByGM", { name: author.name }));
+  } else {
+    return;
+  }
+  await send_report(author.id);
+}
+
 async function on_message(message) {
-  // a GM asking this browser to show someone it has hidden; only GMs may ask
-  if (message?.action === "diagnostics-unhide" && message.to === game.user.id && game.users.get(message.from)?.isGM) {
-    await show_user(message.user);
-    ui.notifications.info(F("Unhidden", { gm: game.users.get(message.from)?.name ?? "GM", name: game.users.get(message.user)?.name ?? "?" }));
-    await send_report(message.from);
-  }
-  if (message?.action === "diagnostics-request" && message.to === game.user.id) {
-    ui.notifications.info(F("RanByGM", { name: game.users.get(message.from)?.name ?? "GM" }));
-    await send_report(message.from);
-  }
+  // reports are only ever posted to GMs, so a forged one can mislead a GM but can't act on anyone's browser
   if (message?.action === "diagnostics-report" && game.user.isGM) {
     // the GM who asked posts it; for a report the player sent unprompted, the designated active GM does
     const poster = message.to ?? game.users.activeGM?.id;
@@ -462,8 +500,9 @@ export function register_diagnostics() {
     static #onRemoteUnhide(_event, target) {
       const player = game.users.get(this.report.self.id);
       const hidden = game.users.get(target.dataset.userId);
-      game.socket.emit(SOCKET, { action: "diagnostics-unhide", from: game.user.id, to: player.id, user: hidden?.id });
-      ui.notifications.info(F("AskedUnhide", { player: player.name, name: hidden?.name ?? "?" }));
+      if (!player || !hidden) return;
+      write_gm_request(player, "unhide", hidden.id);
+      ui.notifications.info(F("AskedUnhide", { player: player.name, name: hidden.name }));
     }
 
     static #onRequest() {
@@ -485,6 +524,8 @@ export function register_diagnostics() {
 Hooks.once("ready", () => {
   game.socket?.on(SOCKET, on_message);
 });
+
+Hooks.on("updateUser", on_gm_request);
 
 Hooks.on("getUserContextOptions", (_application, options) => {
   options.push(

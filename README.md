@@ -93,6 +93,7 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
   - **Send to GM**
 - **For GMs:** right-click any player and choose **Request Voice Diagnostics**. Their browser runs it and sends the report back, and they see a short notice that you did. Reports arrive as chat cards whispered to the GMs, with a button that opens the full report, and they stay in the chat log for later.
 - **Privacy:** a player's own window hides the names of tokens they can't see, and other players' voice modes unless they can hear them. Reports sent to GMs keep full detail. The GM's browser posts the card, because a player could otherwise read their own whispered report in their chat log.
+- **Only a GM can make a player's browser act.** Request Voice Diagnostics and Ask to Show Again are written onto the player's user record. Foundry's server only lets a GM (or the player themselves) write there, and it reports who made the change. The player's browser acts only when that server-supplied author is a GM, so a player can't fake either request.
 
 **Every browser checks itself when it loads.** It gathers its own network addresses the way a voice connection would, using your relay server if one is set. You get a message that stays on screen if:
 - WebRTC is disabled in the browser.
@@ -189,6 +190,8 @@ Compared with upstream 1.1.0, which was verified on Foundry 14.363.
 - **New hotkeys, right-click volume and audio blocking, and `diagnose()`** with a Debug Logging setting.
 - **Voice Diagnostics**: a window in place of the console, and GM-requested reports delivered as chat cards.
   - Why: asking players to open the browser console is unreliable, and the GM is the one who needs the data.
+- **GM-only requests are verified by Foundry's server**, not by the message content.
+  - Why: Foundry doesn't tell module socket listeners who sent a message, so a "from" field is only a claim, and any player could have put a GM's ID there. The other socket messages (voice modes, reconnect requests, self-test results, and reports to the GM) still can't prove their sender. A player at your table could fake them, but none of them reveals data or grants access.
 - **A stale-script check:** the scripts know their own version and show an error that stays on screen when a browser runs an old cached copy.
 
 ### Packaging

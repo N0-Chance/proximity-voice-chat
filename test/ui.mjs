@@ -222,6 +222,11 @@ function renderPlayers() {
   return element;
 }
 const row = id => ui.players.element.querySelector(`li.player[data-user-id="${id}"]`);
+/** delivers a change to a user's record as Foundry's server would: the hook's last argument is who wrote it */
+const deliverUserUpdate = (user, flags, author) => {
+  user.flags = { ...user.flags, ...flags };
+  Hooks.callAll("updateUser", user, { flags: { "proximity-voice-chat": flags } }, {}, author);
+};
 const indicatorOn = token => token.children.find(c => c.pvcStyle && !c.destroyed);
 const speak = async (id, db) => { levelReports.get("proximity-voice-chat." + id)?.cb(db); await tick(); };
 
@@ -695,22 +700,32 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   const sent = emitted.slice(sentBefore).find(m => m.action === "diagnostics-report");
   check("Send to GM sends the full, unredacted report over the socket (not a chat message the player could read)", sent?.to === null && sent.report.redacted === false && created.length === 0, JSON.stringify(sent && { to: sent.to, redacted: sent.report.redacted }));
 
-  // the GM requests a player's diagnostics remotely
+  // the GM requests a player's diagnostics remotely: written to the player's user record, verified by its author
   becomeUser("p1");
+  let socketBefore = emitted.length;
+  receive({ action: "diagnostics-request", from: "gm", to: "p1" }); await tick(); await tick();
+  check("a socket message claiming to be a GM's request does nothing", !emitted.slice(socketBefore).some(m => m.action === "diagnostics-report"));
+  socketBefore = emitted.length;
+  deliverUserUpdate(users[1], { gmRequest: { id: "forged-1", action: "diagnose", user: null } }, "p1"); await tick(); await tick();
+  check("a request written by a player (not a GM) does nothing", !emitted.slice(socketBefore).some(m => m.action === "diagnostics-report"));
   before = notices.length;
   const replyBefore = emitted.length;
-  receive({ action: "diagnostics-request", from: "gm", to: "p1" }); await tick(); await tick();
+  deliverUserUpdate(users[1], { gmRequest: { id: "req-1", action: "diagnose", user: null } }, "gm"); await tick(); await tick();
   check("the player is told the GM ran diagnostics", notices.slice(before).some(n => n.includes("proximity-voice-chat.Diagnostics.RanByGM")), notices.slice(before).join(" | "));
   const reply = emitted.slice(replyBefore).find(m => m.action === "diagnostics-report");
-  check("...and the report goes back to that GM", reply?.to === "gm" && reply.from === "p1");
+  check("...and the report goes back to the GM who wrote the request", reply?.to === "gm" && reply.from === "p1");
+  const replayBefore = emitted.length;
+  Hooks.callAll("updateUser", users[1], { flags: { "proximity-voice-chat": { gmRequest: { id: "req-1" } } } }, {}, "gm"); await tick(); await tick();
+  check("the same request isn't handled twice", !emitted.slice(replayBefore).some(m => m.action === "diagnostics-report"));
 
   becomeUser("gm"); renderPlayers();
   const gmEntries = []; Hooks.callAll("getUserContextOptions", ui.players, gmEntries);
   const request = gmEntries.find(o => o.label === "proximity-voice-chat.Diagnostics.Request");
   check("GMs can request diagnostics from another active player", request.visible(li("p2")) && !request.visible(li("gm")));
   const reqBefore = emitted.length;
-  request.onClick({}, li("p2"));
-  check("requesting sends the request to that player", emitted.slice(reqBefore).some(m => m.action === "diagnostics-request" && m.to === "p2" && m.from === "gm"));
+  request.onClick({}, li("p2")); await tick();
+  const written = users[2].flags.gmRequest;
+  check("requesting writes the request onto that player's user record, not the socket", written?.action === "diagnose" && written.user === null && !!written.id && !emitted.slice(reqBefore).some(m => String(m.action).startsWith("diagnostics-")), JSON.stringify(written));
 
   // the requesting GM's browser posts the card, whispered to GMs, and opens the report
   const report = JSON.parse(JSON.stringify(reply.report));
@@ -755,19 +770,32 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   const win = windows.at(-1);
   const ask = win.content.querySelectorAll("button").find(b => b.dataset.action === "remoteUnhide");
   check("a GM viewing a player's report gets Ask to Show Again for someone they've hidden", !!ask && ask.dataset.userId === "p2");
-  const sentBefore = emitted.length;
-  win.options.actions.remoteUnhide.call(win, {}, ask);
-  check("...which asks that player's browser", emitted.slice(sentBefore).some(m => m.action === "diagnostics-unhide" && m.to === "p1" && m.user === "p2" && m.from === "gm"));
+  win.options.actions.remoteUnhide.call(win, {}, ask); await tick();
+  const unhideRequest = users[1].flags.gmRequest;
+  check("...which writes the request onto that player's user record", unhideRequest?.action === "unhide" && unhideRequest.user === "p2", JSON.stringify(unhideRequest));
 
   becomeUser("p1");
   rtc.client.users.p2 = { ...(rtc.client.users.p2 ?? {}), blocked: true };
-  receive({ action: "diagnostics-unhide", from: "p2", to: "p1", user: "p2" }); await tick();
-  check("only a GM can make a player's browser show someone again", rtc.client.users.p2.blocked === true);
+  receive({ action: "diagnostics-unhide", from: "gm", to: "p1", user: "p2" }); await tick();
+  check("a socket message claiming to be a GM can't show someone again", rtc.client.users.p2.blocked === true);
+  deliverUserUpdate(users[1], { gmRequest: { id: "forged-2", action: "unhide", user: "p2" } }, "p2"); await tick();
+  check("only a GM-written request can make a player's browser show someone again", rtc.client.users.p2.blocked === true);
   const before = notices.length, replyBefore = emitted.length;
-  receive({ action: "diagnostics-unhide", from: "gm", to: "p1", user: "p2" }); await tick(); await tick();
+  deliverUserUpdate(users[1], { gmRequest: unhideRequest }, "gm"); await tick(); await tick();
   check("the player's browser shows them again", rtc.client.users.p2.blocked === false);
   check("...tells the player why", notices.slice(before).some(n => n.includes("proximity-voice-chat.Diagnostics.Unhidden")), notices.slice(before).join(" | "));
   check("...and sends the GM a fresh report", emitted.slice(replyBefore).some(m => m.action === "diagnostics-report" && m.to === "gm"));
+
+  // a diagnose request after an unhide must not carry the old "user" along (setFlag merges objects)
+  becomeUser("gm");
+  rtc.client.users.p2.blocked = true;
+  const gmEntries2 = []; Hooks.callAll("getUserContextOptions", ui.players, gmEntries2);
+  gmEntries2.find(o => o.label === "proximity-voice-chat.Diagnostics.Request").onClick({}, li("p1")); await tick();
+  check("each request writes every field, so nothing is left over from the last one", users[1].flags.gmRequest.action === "diagnose" && users[1].flags.gmRequest.user === null, JSON.stringify(users[1].flags.gmRequest));
+  becomeUser("p1");
+  deliverUserUpdate(users[1], { gmRequest: users[1].flags.gmRequest }, "gm"); await tick(); await tick();
+  check("...so a diagnose request doesn't also show someone again", rtc.client.users.p2.blocked === true);
+  rtc.client.users.p2.blocked = false;
 }
 
 // --- end-to-end relay test: a relay-only connection from a player's browser to the GM's, over a simulated network
