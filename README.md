@@ -81,6 +81,62 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 
 The token's **Proximity** tab holds its speaker list, listen list, and radius. The scene's **Proximity** tab holds its default radius and an option to disable proximity.
 
+## Relay (TURN) server
+**Why you may need one:** Foundry's voice chat is peer to peer, so every pair of players connects directly, and Foundry's default relay setting adds no relay at all. A pair behind strict routers, carrier-grade NAT or a firewall never connects, and their console shows `ICE failed, add a TURN server`. A self-hosted TURN relay fixes this. Players change nothing: Foundry sends the relay settings to every browser.
+
+**Connecting it to Foundry:** in **Configure Audio/Video → Server**, set **Relay Server** to **Custom**, then enter the URL (e.g. `turn:turn.example.com:3478`, starting with `turn:`), username and password.
+- Foundry accepts only one URL, and setting it replaces the browser's default STUN servers. coturn answers STUN on the same port, so direct connections are still tried first.
+- The username and password reach every player's browser, so treat them as public. The server has to be safe even when anyone has them.
+
+**What we did** (coturn, self-hosted, audio only, a table of about 7):
+- **Port forwards** straight to the coturn host, not through a web proxy: 3478 over UDP and TCP, plus the relay port range over UDP.
+- **`external-ip=<public>/<private>`**, because coturn sits behind NAT, so it advertises its public address.
+- **A DNS record for the relay** that isn't proxied. On Cloudflare, use DNS only (grey cloud): its proxy can't carry TURN.
+- **Relaying to private and internal addresses blocked**, so the shared credentials can't be used to reach the LAN (see below).
+
+**What went wrong on our first game day:** the relay handed out addresses but couldn't serve the whole table.
+- **Allocations multiply.** Each browser opens one relay allocation per person it connects through the relay, so a table of *n* players can need about *n* × (*n* − 1) allocations: around 42 for 7. The module's relay test adds one per player for a few seconds.
+- **The cap came from capacity, not quotas.** coturn reserves `max-bps` for each allocation out of its total `bps-capacity`. So `bps-capacity` ÷ `max-bps` is the most allocations it will hold at once. We had 1,000,000 ÷ 32,000, about 31, so later connections were refused with **486 Allocation Bandwidth Quota Reached**.
+- **coturn doesn't log 486s at its default verbosity**, so a clean server log proved nothing. The module now shows these codes in Voice Diagnostics and in notices to the GM.
+- **Everyone shares one username**, so a per-user quota also caps the whole table.
+
+**Suggested settings** after our usage. Both `max-bps` and `bps-capacity` are in bytes per second:
+
+```
+listening-port=3478
+min-port=49160
+max-port=49459            # 300 relay ports: one per allocation, with headroom
+external-ip=<public-ip>/<private-ip>
+realm=turn.example.com
+lt-cred-mech
+user=<username>:<password>
+fingerprint
+no-multicast-peers
+no-tcp-relay
+no-cli
+max-bps=32000             # reserved per allocation
+bps-capacity=12000000     # 12,000,000 / 32,000 = 375 concurrent allocations
+user-quota=300            # everyone shares one username, so this is effectively the table's total
+total-quota=300
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+```
+
+Size it so that **`max-port` − `min-port` and `bps-capacity` ÷ `max-bps` both comfortably exceed *n* × (*n* − 1)** for your largest table. The 100.64.0.0/10 line also blocks Tailscale addresses.
+
+**Testing it:**
+1. **On the server:** coturn's `turnutils_uclient` can hold many allocations at once (`-m <count>`). Run it at more than your table needs to confirm the server's capacity. We confirmed 60 and 200 concurrent allocations with no meaningful loss.
+2. **In Foundry:** save the relay settings again; every browser re-checks, and you're told whether the relay works. Each player's browser also runs the end-to-end relay test to your browser (see [Troubleshooting](#troubleshooting)).
+3. **In a session:** Voice Diagnostics shows each connection as **direct** or **relayed**.
+
 ## Troubleshooting
 **Voice Diagnostics** shows, in plain language, whether your voice chat is working and why not. Open it from **Configure Settings → Proximity Voice Chat → Voice Diagnostics**, or right-click yourself in the players list.
 - **The summary** at the top says how many players you're connected to and lists any problems with your own browser, with the fix. That includes whether your microphone is really capturing and, if not, why: blocked by the browser, turned off in Foundry, or a device that isn't connected. Foundry alone just calls all of these "muted". It also covers push-to-talk, and whether "Fix Voice Connection Drops" is off.
@@ -114,7 +170,7 @@ It prints one row per other user. Each row shows their current volume and why, w
 
 - **You can hear someone but they can't hear you** (or the other way round): the one who can't hear has probably hidden the other. Foundry then connects but plays none of their audio, and with the camera dock hidden that's invisible. Right-click the person in the players list and choose **Show User**, or use **Show Again** in Voice Diagnostics.
 - **A red "old cached copy" error:** the browser is running a stale script. Clear the site's cached files and reload; in Chrome, open F12, right-click reload, and choose **Empty Cache and Hard Reload**.
-- **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a TURN relay server (for example coturn) and enter it in Foundry's audio/video settings under **Relay Server → Custom**. The URL must start with `turn:`. Foundry sends it to every player automatically.
+- **`ICE failed` in the console:** the two browsers can't reach each other directly. Set up a relay server; see [Relay (TURN) server](#relay-turn-server).
 - **Firefox won't connect at all:** check `about:config`. `media.peerconnection.enabled` must be true, and `media.peerconnection.ice.no_host`, `.default_address_only`, `.relay_only`, and `.proxy_only` must be false.
 
 ## Differences from upstream
