@@ -80,6 +80,12 @@ check("a wall type set to 0% is as good as absent", P.direct_sound(path([wall(30
   check("walls meeting on the line count once", h.walls.normal === 1, JSON.stringify(h.walls));
   near("...muffled once", h.muffle, M.normal);
 }
+{
+  const two = P.direct_sound(path([wall(200, -200, 200, 200), wall(400, -200, 400, 200)]));
+  const three = P.direct_sound(path([wall(200, -200, 200, 200), wall(300, -200, 300, 200), wall(400, -200, 400, 200)]));
+  check("two Normal walls: very muffled, still heard", two.via === "through" && two.volume > 0 && two.muffle > 0.9, JSON.stringify(two));
+  check("three Normal walls: too muffled to follow, so silent, with nothing left to give the speaker away", three.via === "blocked" && three.volume === 0 && three.walls.normal === 3, JSON.stringify(three));
+}
 check("out of range is out of range, walls or not", P.direct_sound(path([], { radius: 500 })).via === "range" && P.direct_sound(path([], { radius: 500 })).volume === 0);
 // Foundry's own rules for which walls count from where the sound starts
 check("a one-way wall blocks from one side only",

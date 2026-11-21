@@ -72,7 +72,7 @@ The GM sets how much each kind of wall muffles, from 0% (no effect) to 100% (blo
 | Proximity and Distance walls | 75% | The same, whenever Foundry's threshold rule says they block |
 | Secret doors | 75% | The same as a Normal wall |
 
-- **Several crossings compound.** Two closed doors come to 75%; anything at 100% blocks whatever else is crossed.
+- **Several crossings compound.** Two closed doors come to 75%; anything at 100% blocks whatever else is crossed. Past 97% a voice counts as blocked, which three Normal walls reach.
 - **Open doors and walls with no sound restriction do nothing**, and one-way walls muffle from one side only, as they do for Foundry's own sounds.
 - **Keep secret doors the same as the wall they sit in**, or a player can hear that part of the wall is different.
 - **Whisper and Yell** scale how far a voice carries, including around corners. **Global Listening and Global Speaking** ignore walls, as they ignore distance.

@@ -276,6 +276,7 @@ await setWalls(edge(350, -300, 350, 400, { object: { door: 1, ds: 0 } }));
   check("the scene's outer bounds aren't walls", !p.heard.includes("wall"));
   const h = api.get_user_hearing("p2");
   check("api.get_user_hearing gives the same", h.via === "through" && h.muffle === 0.5 && h.walls.door === 1 && h.pan === 0 && h.from === undefined, JSON.stringify(h));
+  check("...without internals", h.plainWalls === undefined);
 }
 await setWalls(edge(350, -300, 350, 400, { sound: SENSE.NONE, object: { door: 1, ds: 1 } }));
 check("opening the door clears the filter", chain("p2").filter.frequency.value === 20000 && (await peer("p2")).heard === "in the open");
@@ -296,6 +297,7 @@ await setWalls(edge(350, -900, 350, 900));
 // a secret door in that wall, for a player and for the GM's copy of the report
 await setWalls(edge(350, -900, 350, 900, { object: { door: 2, ds: 0 } }));
 check("a secret door is named in the full report", (await peer("p2")).heard.includes("1 secret door"), (await peer("p2")).heard);
+check("...nor to a player's macros through the API", api.get_user_hearing("p2").walls.secret === undefined && api.get_user_hearing("p2").walls.normal === 1, JSON.stringify(api.get_user_hearing("p2").walls));
 check("...but not in a player's own view", (await peer("p2", { redact: true })).heard === "through 1 wall (muffled 75%)" && !JSON.stringify((await peer("p2", { redact: true })).walls).includes("secret"), (await peer("p2", { redact: true })).heard);
 // a short wall: round its end
 await setWalls(edge(350, -10, 350, 400));
@@ -325,6 +327,24 @@ await set("soundPropagation", true); await tick();
 {
   const range = api.get_voice_range(users[2]);
   check("api.get_voice_range gives how far a voice can travel", range.length === 1 && range[0].x === 650 && range[0].y === 50 && range[0].radius === 1200, JSON.stringify(range));
+}
+
+// --- if the propagation maths ever throws, voices fall back to walls blocking, not to silence or a broken page
+{
+  await setWalls(edge(350, -900, 350, 900));
+  const errors = []; const realError = console.error; console.error = (...a) => errors.push(a.join(" "));
+  scene.testSurfaceCollision = () => { throw new Error("surfaces exploded"); };
+  intervals.forEach(fn => fn()); await tick(); intervals.forEach(fn => fn()); await tick();
+  console.error = realError;
+  near("a failure working out propagation leaves Foundry's own sound source in charge", api.get_user_volume("p2"), eased(600));
+  check("...logged once, not every update", errors.filter(e => e.includes("sound propagation failed")).length === 1, errors.length);
+  check("...and shown in diagnostics", (await report()).self.propagationError === "surfaces exploded");
+  delete scene.testSurfaceCollision;
+  // a floor or ceiling in between blocks outright, as it does for Foundry's own sounds
+  scene.testSurfaceCollision = (origin, point, options) => options.type === "sound" && options.level === "L1";
+  intervals.forEach(fn => fn()); await tick();
+  check("a floor or ceiling between them blocks completely", api.get_user_volume("p2") === 0 && (await peer("p2")).via === "blocked");
+  delete scene.testSurfaceCollision; intervals.forEach(fn => fn()); await tick();
 }
 
 // --- while a token moves, routes are searched for at most every 100 ms
@@ -449,6 +469,12 @@ await restart(() => { FakeAudioContext.refuseStream = stream => stream === strea
   const sources = context().sources.length;
   intervals.forEach(fn => fn()); await tick();
   check("...without retrying their stream every second", context().sources.length === sources);
+}
+{
+  const good = streams.p2;
+  await restart(() => { streams.p2 = media.p2.srcObject = { id: "broken", getAudioTracks() { throw new Error("boom"); } }; });
+  check("anything unexpected going wrong: 'error', and voices carry on the old way", onOldPath("error") && api.get_audio_status().detail === "boom", JSON.stringify(api.get_audio_status()));
+  streams.p2 = media.p2.srcObject = good;
 }
 await restart(() => {});
 check("after all that, a working browser is back on the advanced path", api.get_audio_status().path === "advanced" && !!chain("p2") && !notices.some(n => n.includes("Audio.Fallback")));

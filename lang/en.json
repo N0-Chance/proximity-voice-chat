@@ -212,5 +212,6 @@
   "proximity-voice-chat.Settings.Muffle.locked.Label": "Muffle: Locked Doors (%)",
   "proximity-voice-chat.Settings.Muffle.locked.Hint": "How much a voice is muffled each time it passes through locked doors. 0 lets it through untouched; 100 blocks it completely, so it can only be heard around the wall.",
   "proximity-voice-chat.Settings.Muffle.secret.Label": "Muffle: Secret Doors (%)",
-  "proximity-voice-chat.Settings.Muffle.secret.Hint": "How much a voice is muffled each time it passes through secret doors. Keep it the same as the wall around the door, or the door gives itself away by ear. 0 lets it through untouched; 100 blocks it completely, so it can only be heard around the wall."
+  "proximity-voice-chat.Settings.Muffle.secret.Hint": "How much a voice is muffled each time it passes through secret doors. Keep it the same as the wall around the door, or the door gives itself away by ear. 0 lets it through untouched; 100 blocks it completely, so it can only be heard around the wall.",
+  "proximity-voice-chat.Diagnostics.PropagationError": "Working out how sound travels through and around walls failed in this browser, so walls block voices completely here. Tell the GM."
 }

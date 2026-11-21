@@ -320,7 +320,17 @@ function _blocker() {
  * @param {number} voice.pan from -1 (left) to 1 (right)
  * @returns {boolean} true if this path is playing them, and the camera element should be muted
  */
-export function play_voice(user_id, { stream, gain, cutoff, pan }) {
+export function play_voice(user_id, voice) {
+  try {
+    return _play_voice(user_id, voice);
+  } catch (error) {
+    // whatever it was, the old path still works
+    _fail("error", error);
+    return false;
+  }
+}
+
+function _play_voice(user_id, { stream, gain, cutoff, pan }) {
   if (_blocker()) {
     stop_voice(user_id);
     return false;

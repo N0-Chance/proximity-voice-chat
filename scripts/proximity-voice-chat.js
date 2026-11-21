@@ -863,6 +863,9 @@ function _hear_token(token_uuid, proximity_token, mode, listener, muffle) {
   return clarity(around) > clarity(direct) ? around : direct;
 }
 
+/** The error that last stopped sound propagation from being worked out, for Voice Diagnostics; null if none has */
+let _propagation_error = null;
+
 /**
  * Calculates how loud another user should be for this client, in user/input space [0, 1], and how they're heard.
  * @param {foundry.documents.User} other_user
@@ -891,10 +894,18 @@ function _calculate_user_volume(other_user, listeners) {
     speaking_tokens++;
     const source = proximity_token.sources[mode] ?? proximity_token.sources.normal;
     for (const listener of listeners) {
-      let hearing;
-      if (propagation && proximity_token.origin) hearing = _hear_token(token_uuid, proximity_token, mode, listener, muffle);
+      let hearing = null;
+      if (propagation && proximity_token.origin) {
+        try {
+          hearing = _hear_token(token_uuid, proximity_token, mode, listener, muffle);
+        } catch (err) {
+          // better the old behaviour than no voice chat: say so once, and let Foundry's sound source decide
+          if (!_propagation_error) console.error(MODULE_ID + " | sound propagation failed; walls block voices completely until it works again", err);
+          _propagation_error = String(err?.message ?? err);
+        }
+      }
       // with propagation off, walls block sound outright, as Foundry's own sound sources work it out
-      else hearing = { volume: source.getVolumeMultiplier(listener, { easing: true }), muffle: 0, via: "open", from: proximity_token.origin };
+      hearing ??= { volume: source.getVolumeMultiplier(listener, { easing: true }), muffle: 0, via: "open", from: proximity_token.origin };
       if (hearing.via === "blocked") blocked ??= hearing;
       const how_clear = clarity(hearing);
       if (how_clear <= best_clarity) continue;
@@ -1900,8 +1911,10 @@ export function get_user_volume(user_id) {
 export function get_user_hearing(user_id) {
   const hearing = _last_hearing.get(user_id);
   if (!hearing) return null;
-  const { from, plainWalls, ...rest } = hearing;
-  return rest;
+  const { from, plainWalls, walls, ...rest } = hearing;
+  // players aren't told which walls are secret doors
+  const shown = game.user.isGM ? walls : plainWalls;
+  return shown ? { ...rest, walls: shown } : rest;
 }
 
 /**
@@ -2094,6 +2107,7 @@ export async function collect_diagnostics({ redact = false } = {}) {
     relayTest: _relay_test,
     audio: get_audio_status(),
     soundPropagation: !!game.settings.get(MODULE_ID, "soundPropagation"),
+    propagationError: _propagation_error,
     muffle: Object.fromEntries(WALL_KINDS.map(kind => [kind, game.settings.get(MODULE_ID, _muffle_setting(kind))])),
     directional: game.settings.get(MODULE_ID, "directionalAudio") ? game.settings.get(MODULE_ID, "directionalStrength") : 0
   };

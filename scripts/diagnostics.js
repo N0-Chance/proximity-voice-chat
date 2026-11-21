@@ -89,6 +89,7 @@ export function self_issues(self) {
   const audio = self.audio;
   if (audio?.problem) issues.push({ level: "warn", text: game.i18n.localize("proximity-voice-chat.Audio.Fallback") + " " + audio_reason_text(audio) });
   else if (audio?.reason === "waiting") issues.push({ level: "info", text: L("Audio.Waiting") });
+  if (self.propagationError) issues.push({ level: "warn", text: L("PropagationError") + " [" + self.propagationError + "]" });
   return issues;
 }
 

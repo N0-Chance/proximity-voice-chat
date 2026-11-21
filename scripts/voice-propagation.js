@@ -26,6 +26,12 @@ export const DEFAULT_MUFFLE = { limited: 0.4, normal: 0.75, proximity: 0.75, dis
 /** The extra muffling for each bend in a route around walls */
 export const BEND_MUFFLE = 0.08;
 
+/**
+ * Muffled this much, a voice is a faint rumble nobody could follow, so it counts as blocked: silent, and with no
+ * speaking cue to give the speaker away. Three Normal walls at the default 75% get here; two don't.
+ */
+export const BLOCKED_AT = 0.97;
+
 /** A filter cutoff this high is no filter at all */
 export const OPEN_CUTOFF = 20000;
 /** The cutoff just short of fully blocked: a low rumble */
@@ -434,7 +440,7 @@ export function direct_sound({ origin, destination, radius, height = 0, walls, m
   const crossings = line_crossings(origin, destination, walls).filter(crossing => (muffle[crossing.kind] ?? 0) > 0);
   if (!crossings.length) return { volume, muffle: 0, via: "open", from: origin };
   const crossed = _crossings_muffle(crossings, muffle);
-  const blocked = crossed.muffle >= 1;
+  const blocked = crossed.muffle >= BLOCKED_AT;
   return {
     volume: blocked ? 0 : volume, muffle: crossed.muffle, via: blocked ? "blocked" : "through", from: origin,
     walls: crossed.counts, plainWalls: crossed.plain
