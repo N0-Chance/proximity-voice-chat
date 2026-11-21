@@ -187,10 +187,12 @@ check("in the open", P.describe_hearing({ volume: 1, muffle: 0, via: "open" }) =
 check("around a corner, in tiles", P.describe_hearing({ volume: 0.5, muffle: 0.15, via: "around", length: 1400, bends: 2 }, { grid: 100 }) === "around corners (route 14 tiles, 2 bends)", P.describe_hearing({ volume: 0.5, muffle: 0.15, via: "around", length: 1400, bends: 2 }, { grid: 100 }));
 check("through a door, with the muffle", P.describe_hearing({ volume: 0.5, muffle: 0.5, via: "through", walls: { door: 1 } }) === "through 1 closed door (muffled 50%)");
 {
-  const h = P.direct_sound(path([wall(200, -200, 200, 200), wall(300, -200, 300, 200), wall(400, -200, 400, 200, { door: 2 })]));
+  const h = P.direct_sound(path([wall(200, -200, 200, 200, { sense: SENSE.LIMITED }), wall(300, -200, 300, 200, { door: 1 }), wall(400, -200, 400, 200, { door: 2 })]));
   const full = P.describe_hearing(h), redacted = P.describe_hearing(h, { redact: true });
-  check("several kinds are listed", full.startsWith("through 2 walls and 1 secret door (muffled "), full);
-  check("a player's own view doesn't name secret doors", !redacted.includes("secret") && redacted.startsWith("through 3 walls"), redacted);
+  check("several kinds are listed", full.startsWith("through 1 limited wall, 1 closed door and 1 secret door (muffled "), full);
+  check("a player's own view doesn't name secret doors", !redacted.includes("secret") && redacted.startsWith("through 1 limited wall, 1 wall and 1 closed door (muffled "), redacted);
+  const sealed = P.direct_sound(path([wall(200, -200, 200, 200), wall(300, -200, 300, 200), wall(400, -200, 400, 200, { door: 2 })]));
+  check("blocked lists what blocks, and hides secret doors the same way", P.describe_hearing(sealed) === "blocked by 2 walls and 1 secret door" && P.describe_hearing(sealed, { redact: true }) === "blocked by 3 walls", P.describe_hearing(sealed));
 }
 check("blocked says by what", P.describe_hearing({ volume: 0, muffle: 1, via: "blocked", walls: { normal: 1 } }) === "blocked by 1 wall");
 check("nothing to say when out of range", P.describe_hearing({ volume: 0, muffle: 0, via: "range" }) === "");
