@@ -8,7 +8,7 @@
  */
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const PROPAGATION_SCRIPT_VERSION = "1.6.6";
+export const PROPAGATION_SCRIPT_VERSION = "2.0.0";
 
 /**
  * The kinds of wall a GM sets a muffle amount for: the four sound restrictions, and doors by state.
