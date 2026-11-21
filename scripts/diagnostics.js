@@ -85,6 +85,10 @@ export function self_issues(self) {
     issues.push({ level: "info", text: L("Mic.PushToTalk") });
   }
   if (self.connectionFix === false) issues.push({ level: "warn", text: L("FixOff") });
+  // reports from before 2.0 have no audio section
+  const audio = self.audio;
+  if (audio?.problem) issues.push({ level: "warn", text: game.i18n.localize("proximity-voice-chat.Audio.Fallback") + " " + audio_reason_text(audio) });
+  else if (audio?.reason === "waiting") issues.push({ level: "info", text: L("Audio.Waiting") });
   return issues;
 }
 
@@ -100,6 +104,47 @@ function reason_suffix(error) {
   return " " + game.i18n.format("proximity-voice-chat.RelayTest.Because", {
     reason: game.i18n.localize("proximity-voice-chat.RelayTest.Reason." + error.reason), code: error.code
   });
+}
+
+/**
+ * Why a browser or a voice is on the old audio path, in words, with the browser's own error if there was one
+ * @param {{reason: string | null, detail?: string | null}} audio
+ * @returns {string}
+ */
+function audio_reason_text(audio) {
+  if (!audio?.reason) return "";
+  return game.i18n.localize("proximity-voice-chat.Audio.Reason." + audio.reason) + (audio.detail ? " [" + audio.detail + "]" : "");
+}
+
+/**
+ * This browser's audio path as a short phrase, e.g. "advanced (boost 150%)" or "old path: turned off on this device"
+ * @param {object | undefined} audio the report's self.audio
+ * @returns {string}
+ */
+function audio_path_text(audio) {
+  if (!audio) return L("Audio.Unknown");
+  if (audio.path === "advanced") return F("Audio.Advanced", { boost: Math.round((audio.boost ?? 1) * 100) });
+  return L("Audio.Old") + (audio.reason ? ": " + audio_reason_text(audio) : "");
+}
+
+/**
+ * How one user sounds: how the sound gets here, and what the audio path is doing to it, e.g.
+ * "around a corner (route 14 tiles, 1 bend); advanced audio: 120% volume, filter 2.4 kHz, 30% right"
+ * @param {object} peer an entry of the report's peers
+ * @returns {string} empty for reports from before 2.0, and for users who aren't being played
+ */
+export function peer_sound(peer) {
+  const parts = [];
+  if (peer.heard) parts.push(peer.heard);
+  const audio = peer.audio;
+  if (audio?.path === "advanced") {
+    const filter = audio.cutoff >= 20000 ? L("Audio.NoFilter") : F("Audio.Filter", { khz: (audio.cutoff / 1000).toFixed(1) });
+    const side = Math.abs(audio.pan) < 0.01 ? L("Audio.Centre") : F(audio.pan < 0 ? "Audio.Left" : "Audio.Right", { percent: Math.round(Math.abs(audio.pan) * 100) });
+    parts.push(F("Audio.PeerAdvanced", { gain: Math.round(audio.gain * 100), filter, side }));
+  } else if (audio?.reason && peer.volume > 0) {
+    parts.push(L("Audio.PeerOld") + ": " + audio_reason_text(audio));
+  }
+  return parts.join("; ");
 }
 
 /**
@@ -172,7 +217,8 @@ export function report_text(report) {
     summary(report).text,
     ...self_issues(self).map(issue => "! " + issue.text),
     "",
-    ...report.peers.map(peer => "- " + peer.name + ": " + peer_status(peer, self).text + " [" + (peer.route ?? "?") + "]"),
+    ...report.peers.map(peer => "- " + peer.name + ": " + peer_status(peer, self).text + " [" + (peer.route ?? "?") + "]"
+      + (peer_sound(peer) ? "\n    " + peer_sound(peer) : "")),
     "",
     "Foundry " + self.foundry + ", module " + self.module + " (scripts " + self.scripts + ")",
     "Relay: " + (self.relay ?? "none") + "; your addresses: "
@@ -181,6 +227,9 @@ export function report_text(report) {
     "Microphone: " + (self.mic ? (self.mic.capturing ? "capturing" : "NOT capturing") + ", permission " + self.mic.permission
       + ", device " + (self.mic.deviceLabel ?? self.mic.device ?? "?") + ", " + (self.mic.activation ?? "?") : "unknown"),
     "Fix Voice Connection Drops: " + (self.connectionFix === undefined ? "unknown" : self.connectionFix ? "on" : "OFF"),
+    "Voice audio: " + audio_path_text(self.audio) + "; sound through and around walls: "
+      + (self.soundPropagation === undefined ? "unknown" : self.soundPropagation ? "on" : "off")
+      + "; directional voice: " + (self.directional ? self.directional + "%" : "off"),
     "Browser: " + self.browser
   ];
   return lines.join("\n");
@@ -249,6 +298,8 @@ export function render_report(report, { unhide = null } = {}) {
         show.append(el("i", "fa-solid fa-eye"), document.createTextNode(" " + L(unhide === "own" ? "Button.Unhide" : "Button.RemoteUnhide")));
         cell.append(show);
       }
+      const sound = peer_sound(peer);
+      if (sound) cell.append(el("div", "pvc-sound", sound));
       row.append(el("td", "", peer.name + (peer.isGM ? " [GM]" : "")), cell, el("td", "", peer.route ?? "?"));
       table.append(row);
     }
@@ -263,6 +314,11 @@ export function render_report(report, { unhide = null } = {}) {
   fact("Speaking", self.speakingThrough.join(", ") || L("Nothing"));
   fact("Relay", self.relay ?? L("NoRelay"));
   if (self.relay) fact("RelayTest", relay_test_text(self.relayTest));
+  if (self.audio) {
+    fact("Audio", audio_path_text(self.audio));
+    fact("Propagation", L(self.soundPropagation ? "On" : "Off"));
+    fact("Directional", self.directional ? self.directional + "%" : L("Off"));
+  }
   root.append(facts);
 
   const details = el("details", "pvc-details");

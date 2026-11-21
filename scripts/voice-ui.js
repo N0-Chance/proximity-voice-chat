@@ -393,6 +393,11 @@ function _preview_reach(mode) {
     preview.lineStyle({ width: 2, color, alpha: 0.9 });
     preview.beginFill(color, 0.08).drawPolygon(shape.points).endFill();
   }
+  // with sound propagation the voice also gets through and round walls, muffled, as far as this fainter circle
+  for (const { x, y, radius } of api().get_voice_range(game.user)) {
+    preview.lineStyle({ width: 1, color, alpha: 0.45 });
+    preview.drawCircle(x, y, radius);
+  }
   canvas.interface.addChild(preview);
   _reach_preview = preview;
   const started = Date.now();
@@ -679,17 +684,27 @@ function _refresh_voice_bar() {
   }
 }
 
+/**
+ * A slider for how loud one person is for you. On the advanced audio path it goes up to 200%; the old path plays
+ * through a media element, which can't go past 100%.
+ * @param {foundry.documents.User} user
+ */
 function _open_volume_dialog(user) {
-  const value = foundry.audio.AudioHelper.volumeToInput(game.webrtc.settings.getUser(user.id)?.volume ?? 1);
+  const max = api().get_audio_status().path === "advanced" ? 2 : 1;
+  const value = Math.min(max, api().get_user_voice_volume(user.id));
+  const percent = volume => Math.round(volume * 100) + "%";
   const dialog = new foundry.applications.api.DialogV2({
     window: { title: game.i18n.format("proximity-voice-chat.UI.VolumeTitle", { name: user.name }), icon: "fa-solid fa-volume-high" },
-    content: `<input type="range" class="pvc-volume" min="0" max="1" step="0.05" value="${value}">`,
+    content: `<input type="range" class="pvc-volume" min="0" max="${max}" step="0.05" value="${value}">`
+      + `<output class="pvc-volume-value">${percent(value)}</output>`,
     buttons: [{ action: "close", label: "Close", default: true }]
   });
   dialog.render({ force: true }).then(() => {
     dialog.element.querySelector(".pvc-volume")?.addEventListener("input", (event) => {
-      const volume = foundry.audio.AudioHelper.inputToVolume(Number(event.target.value));
-      game.webrtc.settings.set("client", `users.${user.id}.volume`, volume);
+      const volume = Number(event.target.value);
+      const readout = dialog.element.querySelector(".pvc-volume-value");
+      if (readout) readout.textContent = percent(volume);
+      api().set_user_voice_volume(user.id, volume);
     });
   });
 }

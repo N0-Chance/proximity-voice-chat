@@ -26,7 +26,9 @@ globalThis.foundry = {
   av: { AVSettings: { AV_MODES: { DISABLED: 0, AUDIO: 1, VIDEO: 2, AUDIO_VIDEO: 3 } } },
   audio: { AudioHelper: { volumeToInput: v => Math.sqrt(v), inputToVolume: v => v * v } },
 };
-const settings = {};
+// this suite covers the old audio path (Foundry's camera elements), as for a player who has switched
+// "Use the Old Audio Path on This Device" on; test/audio.mjs covers the advanced one
+const settings = { legacyAudio: true };
 const mkUser = (id, name, isGM) => ({ id, name, isGM, uuid: "User." + id, active: true, isSelf: false, flags: {},
   getFlag(m, k) { return this.flags[k]; }, async setFlag(m, k, v) { this.flags[k] = v; Hooks.callAll("updateUser", this, { flags: { [m]: { [k]: v } } }); } });
 const users = [mkUser("gm", "GM", true), mkUser("p1", "Alice", false), mkUser("p2", "Bob", false)];
@@ -42,7 +44,7 @@ tokens.forEach(t => t.document.parent = scene);
 globalThis.game = {
   version: "14.365",
   modules: new Map([["proximity-voice-chat", { version: "test", active: true }]]),
-  settings: { register: (m, k, c) => settings[k] = c.default, get: (m, k) => settings[k] },
+  settings: { register: (m, k, c) => settings[k] ??= c.default, get: (m, k) => settings[k] },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
   socket: { on: (n, fn) => socketHandlers.push(fn), emit() {} },
   keybindings: { register() {}, get: () => [] },

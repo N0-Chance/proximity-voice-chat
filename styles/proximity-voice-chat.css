@@ -190,6 +190,13 @@
   .pvc-report tr.pvc-ok td:nth-child(2) i { color: #5fd35f; }
   .pvc-report tr.pvc-info td:nth-child(2) i { color: #8fb8ff; }
 
+  /* how a player sounds: route or walls, and what the audio path is doing */
+  .pvc-report .pvc-peers .pvc-sound {
+    margin-top: 2px;
+    font-size: 0.9em;
+    opacity: 0.75;
+  }
+
   .pvc-report .pvc-facts {
     margin: 4px 0;
     padding-left: 1.2em;

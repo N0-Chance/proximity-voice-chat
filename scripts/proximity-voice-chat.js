@@ -1,5 +1,13 @@
 import { register_voice_ui_settings, UI_SCRIPT_VERSION } from "./voice-ui.js";
 import { register_diagnostics, DIAG_SCRIPT_VERSION } from "./diagnostics.js";
+import {
+  register_voice_audio_settings, set_voice_audio_listener, play_voice, stop_other_voices, voice_audio_status, voice_status,
+  AUDIO_PROBLEMS, AUDIO_SCRIPT_VERSION
+} from "./voice-audio.js";
+import {
+  WALL_KINDS, DEFAULT_MUFFLE, wall_kind, build_graph, find_route, direct_sound, routed_sound, clarity, muffle_cutoff,
+  muffle_gain, muffle_gain_legacy, pan_for, describe_hearing, PROPAGATION_SCRIPT_VERSION
+} from "./voice-propagation.js";
 
 export const MODULE_ID = "proximity-voice-chat";
 
@@ -385,6 +393,9 @@ Hooks.on("init", async () => {
     default: true,
     requiresReload: true
   });
+  register_voice_audio_settings();
+  _register_propagation_settings();
+  set_voice_audio_listener(_on_audio_path_change);
   _patch_simplepeer();
   register_voice_ui_settings();
   register_diagnostics();
@@ -427,6 +438,11 @@ Hooks.on("init", async () => {
     get_owner_speakers,
     get_token_speakers,
     get_user_volume,
+    get_user_hearing,
+    get_user_voice_volume,
+    set_user_voice_volume,
+    get_audio_status,
+    get_voice_range,
     get_speaking_token_uuids,
     collect_diagnostics,
     diagnose
@@ -512,7 +528,9 @@ export function get_voice_reach(user) {
 }
 
 /**
- * @type {Map<String, {sources: Record<string, foundry.canvas.sources.PointSoundSource>, name: string, userlist: Array<String>}>}
+ * Per token someone speaks through: its sound sources (one per voice mode in use), and where its sound starts, how
+ * far it carries on Normal, and on which level, for working out how it travels through and around walls
+ * @type {Map<String, {sources: Record<string, foundry.canvas.sources.PointSoundSource>, name: string, userlist: Array<String>, origin?: {x: number, y: number, elevation: number}, radius?: number, level?: string}>}
  */
 let _token_proximity_data = new Map();
 
@@ -589,6 +607,9 @@ function _move_source(token) {
   if (!proximity_data) return;
   const radius = get_calculated_token_radius(token) * token_radius_type_pixel_multiplier(token, get_calculated_token_radius_type(token));
   const origin = token.getSoundOrigin(_position_override(token));
+  proximity_data.origin = { x: origin.x, y: origin.y, elevation: origin.elevation ?? 0 };
+  proximity_data.radius = radius;
+  proximity_data.level = token.level ?? globalThis.canvas?.level?.id;
   try {
     for (const [mode, source] of Object.entries(proximity_data.sources)) {
       source.initialize({
@@ -622,6 +643,7 @@ function _position_override(token) {
 
 function _rebuild_all_sources() {
   _token_proximity_data.clear();
+  _routes.clear();
   if (!globalThis.canvas?.scene) return;
   for (const token of canvas.scene.tokens) _rebuild_source(token);
   _schedule_volume_update();
@@ -654,18 +676,200 @@ function _get_listener_tokens() {
 }
 
 /**
- * The positions this client listens from, see _get_listener_tokens
- * @returns {Array<{x: number, y: number, elevation: number}>}
+ * The positions this client listens from, see _get_listener_tokens, each with the token it belongs to
+ * @returns {Array<{x: number, y: number, elevation: number, uuid: string}>}
  */
 function _get_listener_positions() {
-  return _get_listener_tokens().map(token => token.document.getListenerPosition(_position_override(token.document)));
+  return _get_listener_tokens().map(token => ({
+    ...token.document.getListenerPosition(_position_override(token.document)), uuid: token.document.uuid
+  }));
+}
+
+/* -------------------------------------------- */
+/*  Sound through and around walls              */
+/* -------------------------------------------- */
+
+/** The muffle settings, one per wall kind, e.g. "muffleLimited" */
+const _muffle_setting = kind => "muffle" + kind[0].toUpperCase() + kind.slice(1);
+
+function _register_propagation_settings() {
+  game.settings.register(MODULE_ID, "soundPropagation", {
+    name: "proximity-voice-chat.Settings.SoundPropagation.Label",
+    hint: "proximity-voice-chat.Settings.SoundPropagation.Hint",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => _on_propagation_settings_change()
+  });
+  for (const kind of WALL_KINDS) {
+    game.settings.register(MODULE_ID, _muffle_setting(kind), {
+      name: "proximity-voice-chat.Settings.Muffle." + kind + ".Label",
+      hint: "proximity-voice-chat.Settings.Muffle." + kind + ".Hint",
+      scope: "world",
+      config: true,
+      type: Number,
+      range: { min: 0, max: 100, step: 5 },
+      default: Math.round(DEFAULT_MUFFLE[kind] * 100),
+      onChange: () => _on_propagation_settings_change()
+    });
+  }
+  game.settings.register(MODULE_ID, "directionalAudio", {
+    name: "proximity-voice-chat.Settings.DirectionalAudio.Label",
+    hint: "proximity-voice-chat.Settings.DirectionalAudio.Hint",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: () => _schedule_volume_update()
+  });
+  game.settings.register(MODULE_ID, "directionalStrength", {
+    name: "proximity-voice-chat.Settings.DirectionalStrength.Label",
+    hint: "proximity-voice-chat.Settings.DirectionalStrength.Hint",
+    scope: "client",
+    config: true,
+    type: Number,
+    range: { min: 0, max: 100, step: 5 },
+    default: 60,
+    onChange: () => _schedule_volume_update()
+  });
+  // per-person volumes above 100%, which Foundry's own volume setting can't hold; see set_user_voice_volume
+  game.settings.register(MODULE_ID, "userVolumes", {
+    scope: "client",
+    config: false,
+    type: Object,
+    default: {},
+    onChange: () => _schedule_volume_update()
+  });
+}
+
+function _on_propagation_settings_change() {
+  _forget_walls();
+  _schedule_volume_update();
 }
 
 /**
- * Calculates how loud another user should be for this client, in user/input space [0, 1].
+ * The GM's muffle amounts by wall kind, from 0 to 1
+ * @returns {Record<string, number>}
+ */
+function _muffle_amounts() {
+  const amounts = {};
+  for (const kind of WALL_KINDS) amounts[kind] = (game.settings.get(MODULE_ID, _muffle_setting(kind)) ?? 0) / 100;
+  return amounts;
+}
+
+/**
+ * Per level: its walls that restrict sound, as plain data, and the graph for finding routes round them.
+ * Rebuilt after walls or doors change, see _forget_walls.
+ * @type {Map<string, {walls: Array<object>, graph: object}>}
+ */
+const _level_walls = new Map();
+
+/**
+ * Routes round walls already found, per speaking token and listening token, with the positions they were found
+ * for. A route is reused while neither end has moved, and for a moment after one has: see _route_between.
+ * @type {Map<string, {ox: number, oy: number, lx: number, ly: number, radius: number, route: object | null, at: number}>}
+ */
+const _routes = new Map();
+
+/** While a token moves, its routes are searched for at most this often; in between, the last one stands */
+const _ROUTE_INTERVAL_MS = 100;
+let _route_retry = null;
+
+function _forget_walls() {
+  _level_walls.clear();
+  _routes.clear();
+}
+
+/**
+ * The walls of a level that restrict sound. Foundry keeps each level's walls as "edges"; an open door's edge
+ * restricts nothing, so it drops out here by itself.
+ * @param {string | undefined} level_id
+ * @returns {{walls: Array<object>, graph: object}}
+ */
+function _get_sound_walls(level_id) {
+  const key = level_id ?? "";
+  let known = _level_walls.get(key);
+  if (known) return known;
+  const level = canvas.scene?.levels?.get?.(level_id) ?? canvas.level;
+  const walls = [];
+  try {
+    for (const edge of level?.edges?.values?.() ?? []) {
+      if (edge.type !== "wall" || !edge.sound) continue;
+      walls.push({
+        a: { x: edge.a.x, y: edge.a.y }, b: { x: edge.b.x, y: edge.b.y }, sense: edge.sound,
+        door: edge.object?.door ?? 0, ds: edge.object?.ds ?? 0, dir: edge.direction ?? 0, threshold: edge.threshold?.sound ?? 0
+      });
+    }
+  } catch (err) {
+    console.error(MODULE_ID + " | could not read the walls of level " + key, err);
+  }
+  // a route can't pass anything that muffles; walls the GM has set to 0% aren't in its way
+  const muffle = _muffle_amounts();
+  const offset = Math.min(20, Math.max(4, (canvas.scene?.grid?.size ?? 100) / 10));
+  known = { walls, graph: build_graph(walls.filter(wall => muffle[wall_kind(wall)] > 0), { offset }) };
+  _level_walls.set(key, known);
+  return known;
+}
+
+/**
+ * The route round walls from a speaking token to a listening one, searched for at most every _ROUTE_INTERVAL_MS
+ * per pair while either moves. A moving token changes position every frame, and a route found a moment ago is
+ * close enough until the next search; a follow-up update makes sure the final position gets its own.
+ * @returns {object | null} see find_route
+ */
+function _route_between(token_uuid, origin, listener, radius, graph) {
+  const key = token_uuid + "|" + listener.uuid;
+  const known = _routes.get(key);
+  const now = Date.now();
+  if (known && known.radius === radius) {
+    if (known.ox === origin.x && known.oy === origin.y && known.lx === listener.x && known.ly === listener.y) return known.route;
+    if (now - known.at < _ROUTE_INTERVAL_MS) {
+      _route_retry ??= setTimeout(() => {
+        _route_retry = null;
+        _schedule_volume_update();
+      }, _ROUTE_INTERVAL_MS);
+      return known.route;
+    }
+  }
+  const route = find_route(graph, origin, listener, radius);
+  _routes.set(key, { ox: origin.x, oy: origin.y, lx: listener.x, ly: listener.y, radius, route, at: now });
+  return route;
+}
+
+/**
+ * What one listening position hears of one speaking token: the clearer of straight through the walls between
+ * them and round them
+ * @param {string} token_uuid the speaking token
+ * @param {object} proximity_token its entry in _token_proximity_data
+ * @param {string} mode the speaker's voice mode, which scales how far the voice and its route can go
+ * @param {{x: number, y: number, elevation: number, uuid: string}} listener
+ * @param {Record<string, number>} muffle
+ * @returns {object} see Hearing in voice-propagation.js
+ */
+function _hear_token(token_uuid, proximity_token, mode, listener, muffle) {
+  const origin = proximity_token.origin;
+  const radius = proximity_token.radius * _mode_range(mode);
+  const height = Math.abs((listener.elevation ?? 0) - origin.elevation) * (canvas.dimensions?.distancePixels ?? 0);
+  const { walls, graph } = _get_sound_walls(proximity_token.level);
+  const direct = direct_sound({ origin, destination: listener, radius, height, walls, muffle });
+  if (direct.via === "range") return direct;
+  // floors and ceilings stop sound outright, as they do for Foundry's own sounds
+  if (canvas.scene?.testSurfaceCollision?.(origin, listener, { type: "sound", mode: "any", level: proximity_token.level })) {
+    return { volume: 0, muffle: 1, via: "blocked", walls: {}, plainWalls: {} };
+  }
+  if (direct.via === "open") return direct;
+  const around = routed_sound(_route_between(token_uuid, origin, listener, radius, graph), { radius, height });
+  return clarity(around) > clarity(direct) ? around : direct;
+}
+
+/**
+ * Calculates how loud another user should be for this client, in user/input space [0, 1], and how they're heard.
  * @param {foundry.documents.User} other_user
- * @param {Array<{x: number, y: number, elevation: number}>} listeners
- * @returns {{volume: number, reason: string}}
+ * @param {Array<{x: number, y: number, elevation: number, uuid: string}>} listeners
+ * @returns {{volume: number, reason: string, token?: {uuid: string, name: string}, hearing?: object, listener?: object}}
+ *   hearing: for proximity, how the sound reaches you (see Hearing in voice-propagation.js); listener: the
+ *   position you hear them best from
  */
 function _calculate_user_volume(other_user, listeners) {
   // Foundry's own deafen doesn't work in 14.369 (its camera template reads "mutaAll"), so apply it here
@@ -675,9 +879,11 @@ function _calculate_user_volume(other_user, listeners) {
   if (scene?.getFlag(MODULE_ID, "disabled")) return { volume: 1, reason: "scene proximity disabled" };
   if (is_global_listener(game.user)) return { volume: 1, reason: "you are a global listener" };
   if (is_global_speaker(other_user)) return { volume: 1, reason: "they are a global speaker" };
-  let volume = 0;
-  let loudest = null;
-  let loudest_uuid = null;
+  const propagation = !!globalThis.canvas?.ready && game.settings.get(MODULE_ID, "soundPropagation");
+  const muffle = propagation ? _muffle_amounts() : null;
+  let best = null;
+  let best_clarity = 0;
+  let blocked = null;
   let speaking_tokens = 0;
   const mode = get_voice_mode(other_user);
   for (const [token_uuid, proximity_token] of _token_proximity_data) {
@@ -685,21 +891,93 @@ function _calculate_user_volume(other_user, listeners) {
     speaking_tokens++;
     const source = proximity_token.sources[mode] ?? proximity_token.sources.normal;
     for (const listener of listeners) {
-      const token_volume = source.getVolumeMultiplier(listener, { easing: true });
-      if (token_volume <= volume) continue;
-      volume = token_volume;
-      loudest = proximity_token.name;
-      loudest_uuid = token_uuid;
-      if (volume >= 1) break;
+      let hearing;
+      if (propagation && proximity_token.origin) hearing = _hear_token(token_uuid, proximity_token, mode, listener, muffle);
+      // with propagation off, walls block sound outright, as Foundry's own sound sources work it out
+      else hearing = { volume: source.getVolumeMultiplier(listener, { easing: true }), muffle: 0, via: "open", from: proximity_token.origin };
+      if (hearing.via === "blocked") blocked ??= hearing;
+      const how_clear = clarity(hearing);
+      if (how_clear <= best_clarity) continue;
+      best_clarity = how_clear;
+      best = { hearing, listener, uuid: token_uuid, name: proximity_token.name };
+      if (how_clear >= 1) break;
     }
-    if (volume >= 1) break;
+    if (best_clarity >= 1) break;
   }
   if (!globalThis.canvas?.ready) return { volume: 0, reason: "no canvas, so only global speakers are heard" };
   if (speaking_tokens === 0) return { volume: 0, reason: "they speak through no token in this scene" };
   if (listeners.length === 0) return { volume: 0, reason: game.user.isGM ? "no token selected" : "you have no listening token" };
   const how = mode === VOICE_MODES.NORMAL ? "" : " (" + (mode === VOICE_MODES.WHISPER ? "whispering" : "yelling") + ")";
-  if (volume === 0) return { volume: 0, reason: "out of range of their tokens" + how };
-  return { volume, reason: "proximity, through their token \"" + loudest + "\"" + how, token: { uuid: loudest_uuid, name: loudest } };
+  if (!best) {
+    if (blocked) return { volume: 0, reason: "walls block the sound from their tokens" + how, hearing: blocked };
+    return { volume: 0, reason: "out of range of their tokens" + how };
+  }
+  return {
+    volume: best.hearing.volume, reason: "proximity, through their token \"" + best.name + "\"" + how,
+    token: { uuid: best.uuid, name: best.name }, hearing: best.hearing, listener: best.listener
+  };
+}
+
+/**
+ * Where a voice sits between left and right, for "Directional Voice": the direction on screen from the token you
+ * hear them best from to where the sound arrives from, which round a corner is the corner. Centred for anyone
+ * not heard through a token, such as global speakers.
+ * @param {ReturnType<typeof _calculate_user_volume>} heard
+ * @returns {number} from -1 (left) to 1 (right)
+ */
+function _pan_for(heard) {
+  if (!heard.hearing?.from || !heard.listener || !game.settings.get(MODULE_ID, "directionalAudio")) return 0;
+  const strength = game.settings.get(MODULE_ID, "directionalStrength") / 100;
+  // within half a tile the placement eases to the centre, so a voice doesn't flip sides as it passes through you
+  return pan_for(heard.listener, heard.hearing.from, strength, (canvas.scene?.grid?.size ?? 100) / 2);
+}
+
+/**
+ * A user's volume as you've set it, where 1 is 100%. Up to 1 it's Foundry's own per-user volume; above that (only
+ * possible on the advanced audio path) it's the module's.
+ * @param {string} user_id
+ * @returns {number} from 0 to 2
+ */
+export function get_user_voice_volume(user_id) {
+  const extra = game.settings.get(MODULE_ID, "userVolumes")?.[user_id];
+  if (extra > 1) return Math.min(2, extra);
+  return foundry.audio.AudioHelper.volumeToInput(game.webrtc?.settings?.getUser(user_id)?.volume ?? 1);
+}
+
+/**
+ * Sets a user's volume for you. Above 1 (100%) only takes effect on the advanced audio path.
+ * @param {string} user_id
+ * @param {number} volume from 0 to 2
+ * @returns {Promise<void>}
+ */
+export async function set_user_voice_volume(user_id, volume) {
+  volume = Math.min(2, Math.max(0, Number(volume) || 0));
+  const extra = { ...(game.settings.get(MODULE_ID, "userVolumes") ?? {}) };
+  if (volume > 1) extra[user_id] = volume;
+  else delete extra[user_id];
+  await game.settings.set(MODULE_ID, "userVolumes", extra);
+  await game.webrtc.settings.set("client", `users.${user_id}.volume`, foundry.audio.AudioHelper.inputToVolume(Math.min(1, volume)));
+}
+
+/**
+ * Why the advanced audio path can't be used whatever the browser can do: another module's A/V client plays
+ * voices its own way
+ * @returns {string | null}
+ */
+function _audio_path_blocker() {
+  return game.modules.get("avclient-livekit")?.active ? "other-client" : null;
+}
+
+/**
+ * Which audio path this browser plays voices through, and why
+ * @returns {{path: "advanced" | "old", reason: string | null, detail: string | null, problem: boolean, boost: number}}
+ *   reason: "disabled" (by the GM), "opted-out" (on this device), "waiting" (for a first click), "other-client", or
+ *   a problem: "unsupported", "resume", "sink", "output", "error"; boost: the GM's Voice Boost, where 1 is 100%
+ */
+export function get_audio_status() {
+  const blocker = _audio_path_blocker();
+  const status = blocker ? { path: "old", reason: blocker, detail: null } : voice_audio_status();
+  return { ...status, problem: AUDIO_PROBLEMS.includes(status.reason), boost: game.settings.get(MODULE_ID, "voiceBoost") / 100 };
 }
 
 /**
@@ -719,34 +997,95 @@ function _get_audio_element(user_id) {
 /** @type {Map<string, number>} last volume multiplier applied per user, used to only log changes */
 const _last_volumes = new Map();
 
+/** @type {Map<string, object>} how each user was last heard: see get_user_hearing */
+const _last_hearing = new Map();
+
+/** Camera elements this module has muted because the advanced path is playing their stream instead */
+const _muted_elements = new WeakSet();
+
 function _update_volumes() {
   // runs without a canvas too: otherwise "Disable Game Canvas" would leave everyone at full volume.
   // The timer can fire while the page is still loading, before Foundry has set game.user.
-  if (!game.user || !_is_voice_active() || !globalThis.ui?.webrtc) return;
+  if (!game.user || !globalThis.ui?.webrtc) return;
+  if (!_is_voice_active()) return stop_other_voices();
   const listeners = _get_listener_positions();
   const debug = game.settings.get(MODULE_ID, "debug");
+  const boost = game.settings.get(MODULE_ID, "voiceBoost") / 100;
+  const advanced_allowed = !_audio_path_blocker();
+  const advanced = new Set();
   for (const other_user of game.users) {
     if (!other_user.active || other_user.isSelf) continue;
-    const { volume: multiplier, reason } = _calculate_user_volume(other_user, listeners);
+    const heard = _calculate_user_volume(other_user, listeners);
+    const { volume: multiplier, reason } = heard;
+    const muffle = heard.hearing?.muffle ?? 0;
+    const pan = _pan_for(heard);
     if (debug && _last_volumes.get(other_user.id) !== multiplier) {
       console.log(MODULE_ID + " | " + other_user.name + " -> " + multiplier.toFixed(2) + " (" + reason + ")");
     }
     _last_volumes.set(other_user.id, multiplier);
+    _last_hearing.set(other_user.id, { ...heard.hearing, volume: multiplier, muffle, cutoff: muffle_cutoff(muffle), pan });
 
+    // no element means Foundry isn't playing them (e.g. you've hidden them), so neither path does
     const audio_element = _get_audio_element(other_user.id);
     if (!audio_element) continue;
     // apply the multiplier in user/input space (0.8 = 80% as loud) rather than the logarithmic space element.volume uses
-    const slider_volume = game.webrtc.settings.getUser(other_user.id)?.volume ?? 1;
-    const volume = foundry.audio.AudioHelper.inputToVolume(foundry.audio.AudioHelper.volumeToInput(slider_volume) * multiplier);
-    if (Math.abs(audio_element.volume - volume) > 0.001) audio_element.volume = volume;
+    const slider = get_user_voice_volume(other_user.id);
+    let playing;
+    // the advanced path takes the stream from the camera element, and plays it louder than an element can
+    const gain = foundry.audio.AudioHelper.inputToVolume(slider * multiplier) * muffle_gain(muffle) * boost;
+    if (advanced_allowed && audio_element.srcObject && play_voice(other_user.id, { stream: audio_element.srcObject, gain, cutoff: muffle_cutoff(muffle), pan })) {
+      advanced.add(other_user.id);
+      // the element keeps the stream flowing (Chrome needs that) but mustn't be heard as well
+      if (!audio_element.muted) audio_element.muted = true;
+      _muted_elements.add(audio_element);
+      playing = gain > 0;
+    } else {
+      if (_muted_elements.has(audio_element)) {
+        audio_element.muted = false;
+        _muted_elements.delete(audio_element);
+      }
+      // an element can't be louder than 100% or filtered, so here muffled just means quieter
+      const volume = Math.min(1, foundry.audio.AudioHelper.inputToVolume(Math.min(1, slider) * multiplier) * muffle_gain_legacy(muffle));
+      if (Math.abs(audio_element.volume - volume) > 0.001) audio_element.volume = volume;
+      playing = volume > 0;
+    }
     // an element with no stream (e.g. a user with no microphone) has nothing to play, and play() would only fail
-    if (audio_element.paused && volume > 0 && audio_element.srcObject) {
+    if (audio_element.paused && playing && audio_element.srcObject) {
       // Chrome can pause a media element whose volume goes from 0 back up, so resume it
       audio_element.play()?.catch((err) => {
         if (debug) console.warn(MODULE_ID + " | could not resume audio for " + other_user.name, err);
       });
     }
   }
+  // anyone left on the advanced path without being played above has gone: left, hidden, or lost their stream
+  stop_other_voices(advanced);
+}
+
+/** The audio path last looked at, so a change is only acted on once */
+let _known_audio_reason;
+
+/**
+ * The advanced audio path started, stopped or failed: re-apply every volume on whichever path is now in use
+ */
+function _on_audio_path_change() {
+  _schedule_volume_update();
+  // before the self-test has run there's nobody to tell yet; it looks at the path itself when it does
+  if (_self_test) _check_audio_path();
+}
+
+/**
+ * Notes which audio path this browser is on. If the advanced path has failed, says so here and tells the GMs,
+ * like the connection self-test does.
+ */
+function _check_audio_path() {
+  const status = get_audio_status();
+  if (_self_test) _self_test.audio = status;
+  if (status.reason === _known_audio_reason) return;
+  _known_audio_reason = status.reason;
+  if (AUDIO_PROBLEMS.includes(status.reason)) {
+    ui.notifications.warn(game.i18n.localize("proximity-voice-chat.Audio.Fallback") + " " + game.i18n.localize("proximity-voice-chat.Audio.Reason." + status.reason));
+  }
+  _report_self_test();
 }
 
 let _volume_update_scheduled = false;
@@ -867,9 +1206,14 @@ Hooks.on("userConnected", (user, connected) => {
   else _schedule_volume_update();
 });
 
+/** Every script's own version; they all match the installed module unless a browser has an old one cached */
+function _script_versions() {
+  return [SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION, AUDIO_SCRIPT_VERSION, PROPAGATION_SCRIPT_VERSION];
+}
+
 Hooks.once("ready", () => {
   const installed = game.modules.get(MODULE_ID).version;
-  const versions = [SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION];
+  const versions = _script_versions();
   if (versions.every(version => version === installed)) return;
   const script = [...new Set(versions)].join(" / ");
   const message = game.i18n.format("proximity-voice-chat.UI.StaleScript", { script, installed });
@@ -879,12 +1223,14 @@ Hooks.once("ready", () => {
 
 Hooks.on("canvasTearDown", (_canvas) => {
   _token_proximity_data.clear();
+  _forget_walls();
   if (game.user.isGM) _share_gm_selection();
 });
 
 Hooks.on("canvasReady", (_canvas) => {
   // also clears a selection left over from a previous session or scene
   if (game.user.isGM) _share_gm_selection();
+  _forget_walls();
   _rebuild_all_sources();
 });
 
@@ -892,14 +1238,33 @@ let _wall_rebuild_timeout = null;
 function _on_wall_change() {
   // walls and doors affect audio line of sight; rebuild after core has refreshed its edges
   clearTimeout(_wall_rebuild_timeout);
-  _wall_rebuild_timeout = setTimeout(_rebuild_all_sources, 50);
+  _wall_rebuild_timeout = setTimeout(() => {
+    _forget_walls();
+    _rebuild_all_sources();
+  }, 50);
 }
 Hooks.on("createWall", _on_wall_change);
 Hooks.on("updateWall", _on_wall_change);
 Hooks.on("deleteWall", _on_wall_change);
 
+/**
+ * Foundry replaces a user's camera element whenever it re-renders their tile, and the new one starts unmuted at
+ * their plain volume. For anyone the advanced path is playing, mute it at once rather than a moment later, or
+ * they'd be heard twice, at the wrong volume, until the next update.
+ */
+function _mute_replaced_elements() {
+  for (const user of game.users) {
+    if (!user.active || user.isSelf || voice_status(user.id).path !== "advanced") continue;
+    const audio_element = _get_audio_element(user.id);
+    if (!audio_element || _muted_elements.has(audio_element)) continue;
+    audio_element.muted = true;
+    _muted_elements.add(audio_element);
+  }
+}
+
 Hooks.on("renderCameraViews", (_application, _element, _context, _options) => {
   if (game.user.isGM) _add_gm_voice_buttons();
+  _mute_replaced_elements();
   // re-rendering the camera views resets video.volume so it has to be applied again
   _schedule_volume_update();
 });
@@ -1018,7 +1383,7 @@ function _self_test_problem(result) {
   return null;
 }
 
-/** @type {{supported: boolean, types: Record<string, number>, problem: string | null} | null} */
+/** @type {{supported: boolean, types: Record<string, number>, problem: string | null, audio?: object} | null} */
 let _self_test = null;
 
 /**
@@ -1030,7 +1395,7 @@ async function _run_self_test({ relay_changed = false } = {}) {
   if (!_is_voice_active()) return;
   const result = await _gather_own_addresses();
   const problem = _self_test_problem(result);
-  _self_test = { ...result, problem };
+  _self_test = { ...result, problem, audio: get_audio_status() };
   if (problem === "webrtc-disabled" || problem === "no-addresses") {
     ui.notifications.error("proximity-voice-chat.SelfTest." + problem, { localize: true, permanent: true });
   } else if (problem === "relay-unreachable" && game.user.isGM) {
@@ -1041,20 +1406,24 @@ async function _run_self_test({ relay_changed = false } = {}) {
   if (problem) console.warn(MODULE_ID + " | connection self-test: " + problem, result.types, result.relayError ?? "");
   // a relay address alone doesn't prove the relay carries anything, so players also test a real relayed path
   if (!problem && _custom_relay() && !game.user.isGM) await run_relay_test();
-  _report_self_test();
+  // the advanced audio path is part of the self-test: asking for its status starts it, if it can start
+  _known_audio_reason = undefined;
+  _check_audio_path();
 }
 
 function _report_self_test() {
   if (!_self_test || game.user.isGM) return;
   game.socket?.emit(_SOCKET, {
     action: "voice-self-test", from: game.user?.id ?? game.userId, problem: _self_test.problem, types: _self_test.types,
-    relayError: _self_test.relayError ?? null, relayTest: _relay_test
+    relayError: _self_test.relayError ?? null, relayTest: _relay_test,
+    audio: _self_test.audio ? { path: _self_test.audio.path, reason: _self_test.audio.reason, detail: _self_test.audio.detail } : null
   });
 }
 
 /** The last self-test problem and relay test result each user reported, so a GM isn't shown the same notice twice */
 const _reported_problems = new Map();
 const _reported_relay = new Map();
+const _reported_audio = new Map();
 
 /**
  * Shows a GM another user's failed self-test or relay test, by name, with what to do about it
@@ -1077,6 +1446,14 @@ function _on_self_test_report(message) {
   if (user && (status === "no-allocation" || status === "no-route") && status !== previous_status) {
     const text = game.i18n.format("proximity-voice-chat.RelayTest.Player." + status, { name: user.name }) + _relay_reason_suffix(message.relayTest.error);
     ui.notifications.warn(text, { permanent: true });
+  }
+  // a browser that fell back to the old audio path still works, so this is a warning that goes away by itself
+  const audio = AUDIO_PROBLEMS.includes(message.audio?.reason) ? message.audio.reason : null;
+  const previous_audio = _reported_audio.get(message.from) ?? null;
+  _reported_audio.set(message.from, audio);
+  if (user && audio && audio !== previous_audio) {
+    ui.notifications.warn(game.i18n.format("proximity-voice-chat.Audio.Player.Fallback", { name: user.name })
+      + " " + game.i18n.localize("proximity-voice-chat.Audio.Reason." + audio));
   }
 }
 
@@ -1513,6 +1890,38 @@ export function get_user_volume(user_id) {
 }
 
 /**
+ * How another user currently reaches you, as last applied: how muffled, by what, and from which side
+ * @param {string} user_id
+ * @returns {{volume: number, muffle: number, cutoff: number, pan: number, via?: string, walls?: Record<string, number>, length?: number, bends?: number} | null}
+ *   volume: by distance alone, as get_user_volume; muffle: 0 to 1; cutoff: the low-pass filter in Hz (20000 is
+ *   none); pan: -1 left to 1 right; via: "open", "through" (walls), "around" (them) or "blocked", when they're
+ *   heard by proximity; walls: how many of each kind are crossed; length (pixels) and bends: of the way round
+ */
+export function get_user_hearing(user_id) {
+  const hearing = _last_hearing.get(user_id);
+  if (!hearing) return null;
+  const { from, plainWalls, ...rest } = hearing;
+  return rest;
+}
+
+/**
+ * How far a user's voice can travel at most, per token they speak through. With sound propagation it goes
+ * through and round walls, so it can be heard, muffled, outside the areas get_voice_reach gives.
+ * @param {foundry.documents.User} user
+ * @returns {Array<{x: number, y: number, radius: number}>} empty when sound propagation is off
+ */
+export function get_voice_range(user) {
+  if (!game.settings.get(MODULE_ID, "soundPropagation")) return [];
+  const range = _mode_range(get_voice_mode(user));
+  const circles = [];
+  for (const data of _token_proximity_data.values()) {
+    if (!data.userlist.includes(user.uuid) || !data.origin) continue;
+    circles.push({ x: data.origin.x, y: data.origin.y, radius: data.radius * range });
+  }
+  return circles;
+}
+
+/**
  * The UUIDs of the tokens in the current scene that a user speaks through
  * @param {foundry.documents.User} user
  * @returns {Array<string>}
@@ -1663,7 +2072,7 @@ export async function collect_diagnostics({ redact = false } = {}) {
     isGM: game.user.isGM,
     foundry: game.version,
     module: game.modules.get(MODULE_ID).version,
-    scripts: [...new Set([SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION])].join(" / "),
+    scripts: [...new Set(_script_versions())].join(" / "),
     browser: navigator.userAgent,
     canvasReady: !!globalThis.canvas?.ready,
     voiceActive: _is_voice_active(),
@@ -1682,7 +2091,11 @@ export async function collect_diagnostics({ redact = false } = {}) {
     addresses: own.types,
     addressProblem: own.problem,
     relayError: own.relayError ?? null,
-    relayTest: _relay_test
+    relayTest: _relay_test,
+    audio: get_audio_status(),
+    soundPropagation: !!game.settings.get(MODULE_ID, "soundPropagation"),
+    muffle: Object.fromEntries(WALL_KINDS.map(kind => [kind, game.settings.get(MODULE_ID, _muffle_setting(kind))])),
+    directional: game.settings.get(MODULE_ID, "directionalAudio") ? game.settings.get(MODULE_ID, "directionalStrength") : 0
   };
   const users = game.users.filter(user => user.active && !user.isSelf);
   const routes = await Promise.all(users.map(user => _peer_route(game.webrtc?.client?.peers?.get(user.id))));
@@ -1692,8 +2105,13 @@ export async function collect_diagnostics({ redact = false } = {}) {
     const stream = game.webrtc?.client?.getMediaStreamForUser?.(user.id) ?? element?.srcObject;
     const tracks = typeof stream?.getAudioTracks === "function" ? stream.getAudioTracks() : [];
     const settings = game.webrtc?.settings?.getUser(user.id);
-    let { volume, reason, token } = _calculate_user_volume(user, listeners);
+    const heard = _calculate_user_volume(user, listeners);
+    let { volume, reason, token } = heard;
     if (redact && token && !_can_see_token(token.uuid)) reason = reason.replace("\"" + token.name + "\"", "you can't see");
+    // how the sound gets here; a player's own view doesn't tell secret doors from the walls they look like
+    const muffle = heard.hearing?.muffle ?? 0;
+    const walls = (redact ? heard.hearing?.plainWalls : heard.hearing?.walls) ?? null;
+    const audio = _audio_path_blocker() ? { path: "old", reason: _audio_path_blocker() } : voice_status(user.id);
     // Foundry's getConnectedUsers() lists anyone with a connection object, even one that never finished,
     // so ask the browser's own connection state instead
     const peer = game.webrtc?.client?.peers?.get(user.id);
@@ -1734,7 +2152,18 @@ export async function collect_diagnostics({ redact = false } = {}) {
       audioBlocked: settings ? !settings.canBroadcastAudio : false,
       volume: Number(volume.toFixed(2)),
       reason,
-      slider: Number(foundry.audio.AudioHelper.volumeToInput(settings?.volume ?? 1).toFixed(2)),
+      // "around corners (route 14 tiles, 2 bends)", "through 1 closed door (muffled 50%)"; empty unless by proximity
+      heard: heard.hearing?.via ? describe_hearing(heard.hearing, { grid: canvas.scene?.grid?.size ?? 100, redact }) : "",
+      via: heard.hearing?.via ?? null,
+      walls,
+      routeLength: heard.hearing?.length != null ? Math.round(heard.hearing.length) : null,
+      bends: heard.hearing?.bends ?? null,
+      muffle: Number(muffle.toFixed(2)),
+      cutoff: Math.round(muffle_cutoff(muffle)),
+      pan: Number(_pan_for(heard).toFixed(2)),
+      // which path plays them: "advanced" with the gain, filter and pan in force, or "old" and why
+      audio: audio.path === "advanced" ? { path: "advanced", gain: Number(audio.gain.toFixed(2)), cutoff: Math.round(audio.cutoff), pan: Number(audio.pan.toFixed(2)) } : audio,
+      slider: Number(get_user_voice_volume(user.id).toFixed(2)),
       element: element ? (element.tagName?.toLowerCase() ?? "media") : null,
       elementVolume: element ? Number(element.volume.toFixed(2)) : null,
       paused: element?.paused ?? null,
@@ -1780,7 +2209,12 @@ export async function diagnose() {
     yourAddresses: self.webrtcSupported ? Object.entries(self.addresses).map(([type, count]) => type + " " + count).join(", ") || "NONE" : "WebRTC disabled",
     yourAddressProblem: self.addressProblem ?? "none",
     yourMicrophone: self.mic,
-    connectionFix: self.connectionFix
+    connectionFix: self.connectionFix,
+    audioPath: self.audio.path + (self.audio.reason ? " (" + self.audio.reason + (self.audio.detail ? ": " + self.audio.detail : "") + ")" : ""),
+    voiceBoost: self.audio.boost,
+    soundPropagation: self.soundPropagation,
+    muffle: self.muffle,
+    directional: self.directional
   });
   const rows = peers.map(peer => ({
     user: peer.name,
@@ -1795,6 +2229,10 @@ export async function diagnose() {
     mutedOrBlocked: peer.muted || peer.audioBlocked,
     proximity: peer.volume,
     reason: peer.reason,
+    heard: peer.heard,
+    muffle: peer.muffle,
+    audio: peer.audio.path === "advanced" ? "advanced: gain " + peer.audio.gain + ", filter " + peer.audio.cutoff + " Hz, pan " + peer.audio.pan
+      : "old" + (peer.audio.reason ? " (" + peer.audio.reason + ")" : ""),
     slider: peer.slider,
     element: peer.element ?? "MISSING",
     elementVolume: peer.elementVolume,

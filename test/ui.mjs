@@ -84,6 +84,11 @@ class Text extends Container {
 }
 globalThis.PIXI = { Container, Graphics, Sprite, Text };
 
+// --- a browser with Web Audio, already clicked in; the voice path itself is covered by test/audio.mjs
+const { FakeAudioContext } = await import("./fake-audio.mjs");
+FakeAudioContext.startState = "running";
+globalThis.AudioContext = FakeAudioContext;
+
 // --- Foundry stubs
 globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 } };
 const hooks = {};
@@ -364,6 +369,10 @@ check("the mode button turns blue with the shush icon", modeButton().classList.c
 check("your own row shows a persistent Whisper tag", row("p1").querySelector(".pvc-mode-tag")?.className.includes("pvc-mode-whisper"));
 const preview = canvas.interface.children.at(-1);
 check("switching shows your reach on your token, walls included", preview?.polygons?.length === 1 && preview.polygons[0][2] - preview.polygons[0][0] === 300, JSON.stringify(preview?.polygons));
+check("...and a fainter circle for how far it can carry through and round walls", preview?.circles?.length === 1 && preview.circles[0].r === 300 && preview.circles[0].x === 50 && preview.line.alpha < 0.9, JSON.stringify(preview?.circles));
+settings.soundPropagation = false; await modeButton().dispatch("click"); await modeButton().dispatch("click"); await modeButton().dispatch("click"); await tick();
+check("with sound propagation off there's no circle: walls are the limit", !canvas.interface.children.at(-1).circles?.length && canvas.interface.children.at(-1).polygons.length === 1);
+settings.soundPropagation = true;
 await modeButton().dispatch("click"); await tick();
 check("clicking again switches to Yell (orange, megaphone)", api.get_voice_mode(users[1]) === "yell" && modeButton().classList.contains("pvc-mode-yell") && modeButton().querySelector("i").className.includes("fa-megaphone"));
 check("the reach preview follows the new range", canvas.interface.children.at(-1).polygons[0][2] - canvas.interface.children.at(-1).polygons[0][0] === 2400);
@@ -432,6 +441,18 @@ volume.onClick({}, li("p2")); await tick();
 const slider = dialogs.at(-1).element.querySelector(".pvc-volume");
 slider.value = "0.5"; await slider.dispatch("input", { target: slider });
 check("volume slider sets Bob's volume", Math.abs(rtc.client.users.p2.volume - 0.25) < 1e-9, String(rtc.client.users.p2?.volume));
+// 2.0: on the advanced audio path a person can be turned up past 100%
+check("on the advanced audio path the slider goes up to 200%", dialogs.at(-1).options.content.includes('max="2"') && dialogs.at(-1).options.content.includes("pvc-volume-value"), dialogs.at(-1).options.content);
+slider.value = "1.5"; await slider.dispatch("input", { target: slider }); await tick();
+check("above 100% is kept by the module, with Foundry's own volume at its maximum", api.get_user_voice_volume("p2") === 1.5 && rtc.client.users.p2.volume === 1 && settings.userVolumes.p2 === 1.5, JSON.stringify(settings.userVolumes));
+volume.onClick({}, li("p2")); await tick();
+check("the dialog reopens at 150%", dialogs.at(-1).options.content.includes('value="1.5"') && dialogs.at(-1).options.content.includes(">150%<"), dialogs.at(-1).options.content);
+settings.legacyAudio = true;
+volume.onClick({}, li("p2")); await tick();
+check("on the old audio path the slider stops at 100%", dialogs.at(-1).options.content.includes('max="1"') && dialogs.at(-1).options.content.includes('value="1"'), dialogs.at(-1).options.content);
+settings.legacyAudio = false;
+slider.value = "0.5"; await slider.dispatch("input", { target: slider }); await tick();
+check("back under 100% it's Foundry's own volume again", Math.abs(rtc.client.users.p2.volume - 0.25) < 1e-9 && settings.userVolumes.p2 === undefined);
 
 // ===== GM's client
 becomeUser("gm");
@@ -915,6 +936,40 @@ function renderTokenConfig(value, disabled, listenValue = "") {
   net.routeOK = true;
   delete globalThis.RTCPeerConnection;
   rtc.world.turn = { type: "server", url: "", username: "", password: "" };
+}
+
+// --- 2.0: Voice Diagnostics says how each player sounds and which audio path is in use
+{
+  const D = await import(new URL("./diagnostics.js", mainScript.startsWith("file:") ? mainScript : "file://" + mainScript).href);
+  becomeUser("p1"); await tick();
+  const report = await api.collect_diagnostics();
+  check("the report says which audio path this browser is on", report.self.audio?.path === "advanced" && report.self.audio.boost === 1.5 && report.self.soundPropagation === true, JSON.stringify(report.self.audio));
+  const bob = report.peers.find(p => p.id === "p2");
+  check("each peer carries how they're heard and their audio path", typeof bob.heard === "string" && typeof bob.muffle === "number" && typeof bob.cutoff === "number" && typeof bob.pan === "number" && !!bob.audio, JSON.stringify(bob));
+  // a made-up peer, as a browser with working audio would report it
+  const base = { ...bob, connected: true, problem: null, volume: 0.6, muted: false, receivingAudio: true };
+  const corner = { ...base, heard: "around a corner (route 14 tiles, 1 bend)", audio: { path: "advanced", gain: 1.2, cutoff: 2449, pan: -0.3 } };
+  const sound = D.peer_sound(corner);
+  check("a peer's sound line: the route, then volume, filter and side", sound.startsWith("around a corner (route 14 tiles, 1 bend); ") && sound.includes("Audio.PeerAdvanced") && sound.includes('"gain":120') && sound.includes("Audio.Filter") && /khz\W+2\.4/.test(sound) && sound.includes("Audio.Left") && /percent\W+30/.test(sound), sound);
+  const open = D.peer_sound({ ...base, heard: "in the open", audio: { path: "advanced", gain: 1.5, cutoff: 20000, pan: 0 } });
+  check("unfiltered and centred are said in words", open.includes("Audio.NoFilter") && open.includes("Audio.Centre"), open);
+  const old = D.peer_sound({ ...base, heard: "through 1 closed door (muffled 50%)", audio: { path: "old", reason: "sink", detail: "NotFoundError" } });
+  check("a peer on the old path says why", old.includes("through 1 closed door") && old.includes("Audio.PeerOld") && old.includes("Audio.Reason.sink") && old.includes("NotFoundError"), old);
+  check("a report from before 2.0 has no sound line", D.peer_sound({ ...base, heard: undefined, audio: undefined }) === "");
+  const rendered = D.render_report({ ...report, peers: [corner] });
+  check("the sound line shows under the player's status", allText(rendered.querySelector(".pvc-sound")).includes("around a corner"), allText(rendered));
+  check("the facts list the audio path, propagation and directional voice", ["Fact.Audio", "Audio.Advanced", "Fact.Propagation", "Fact.Directional"].every(t => allText(rendered).includes(t)), allText(rendered.querySelector(".pvc-facts")));
+  const text = D.report_text({ ...report, peers: [corner] });
+  check("Copy Report includes them", text.includes("around a corner (route 14 tiles, 1 bend)") && text.includes("Voice audio: ") && text.includes("sound through and around walls: on"), text);
+  const failed = { ...report.self, audio: { path: "old", reason: "resume", detail: "nope", problem: true, boost: 1.5 } };
+  check("a browser that fell back gets a warning with the reason", self_issues(failed).some(i => i.level === "warn" && i.text.includes("Audio.Fallback") && i.text.includes("Audio.Reason.resume") && i.text.includes("nope")), JSON.stringify(self_issues(failed)));
+  check("...and the facts say old path", allText(D.render_report({ ...report, self: failed })).includes("Audio.Old"));
+  const waiting = { ...report.self, audio: { path: "old", reason: "waiting", detail: null, problem: false, boost: 1.5 } };
+  check("not having clicked yet is a hint, not a warning", self_issues(waiting).some(i => i.level === "info" && i.text.includes("Audio.Waiting")) && !self_issues(waiting).some(i => i.text.includes("Audio.Fallback")));
+  const chosen = { ...report.self, audio: { path: "old", reason: "opted-out", detail: null, problem: false, boost: 1.5 } };
+  check("choosing the old path isn't flagged at all", !self_issues(chosen).some(i => i.text.includes("Audio.")));
+  const { audio, soundPropagation, directional, muffle, ...before2 } = report.self;
+  check("a report from before 2.0 still renders", !self_issues(before2).some(i => i.text.includes("Audio.")) && !allText(D.render_report({ ...report, self: before2 })).includes("Fact.Audio") && D.report_text({ ...report, self: before2 }).includes("Voice audio: "));
 }
 
 console.log(fails ? fails + " FAILURES" : "ALL PASSED");
