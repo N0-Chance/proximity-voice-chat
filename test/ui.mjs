@@ -71,10 +71,14 @@ class Container {
 }
 class Graphics extends Container {
   lineStyle(o) { this.line = o; return this; }
-  beginFill(c) { this.fill = c; return this; }
+  beginFill(c) { this.fill = c; (this.fills ??= []).push(c); return this; }
   endFill() { return this; }
   drawCircle(x, y, r) { (this.circles ??= []).push({ x, y, r }); return this; }
   drawPolygon(points) { (this.polygons ??= []).push(points); return this; }
+  moveTo(x, y) { this.pen = { x, y }; return this; }
+  lineTo(x, y) { this.pen = { x, y }; return this; }
+  // like PIXI 7: an arc in the current line style and fill
+  arc(x, y, r, start, end) { (this.arcs ??= []).push({ x, y, r, start, end, color: this.line?.color, width: this.line?.width, fill: this.fill }); return this; }
 }
 class Sprite extends Container {
   constructor(t) { super(); this.texture = t; this.anchor = { set() {} }; this.position = { set: (x, y) => { this.x = x; this.y = y; } }; }
@@ -276,7 +280,22 @@ tokens[1].document.x = 5000; tokens[1].document._source.x = 5000;
 Hooks.callAll("refreshToken", tokens[1], { refreshPosition: true }); await tick();
 await speak("p2", -20);
 check("Bob out of earshot: row shows speaking but dimmed", row("p2").classList.contains("pvc-speaking") && row("p2").classList.contains("pvc-inaudible"));
-check("Bob out of earshot: no cue on his token", !indicatorOn(tokens[1]));
+check("Bob out of earshot: the row shows the 'lips moving' speech bubble", row("p2").querySelector(".pvc-speaking-icon").className.includes("fa-comment-dots"));
+const unheard = indicatorOn(tokens[1]);
+check("Bob out of earshot: a thin ring on his token, in his colour", unheard?.pvcStyle === "ring" && unheard.pvcHeard === false
+  && unheard.children[0]?.line?.color === 0x0000ff && unheard.children[0].line.width < 3, JSON.stringify(unheard?.children[0]?.line));
+check("...without a ripple, and pulsing fainter than heard speech", !unheard?.children.some(c => c.pvcRipple) && unheard?.pvcPulse?.base < 0.6);
+settings.speakingIndicatorOverride = "badge"; Hooks.callAll("drawToken"); await tick();
+check("Bob out of earshot, badge style: a speech bubble with dots", indicatorOn(tokens[1])?.children.some(c => c.text === "\uf4ad"));
+settings.speakingIndicatorOverride = "icon"; Hooks.callAll("drawToken"); await tick();
+check("Bob out of earshot, icon style: a speech bubble with dots", indicatorOn(tokens[1])?.children.some(c => c.text === "\uf4ad"));
+settings.speakingIndicatorOverride = "default"; Hooks.callAll("drawToken"); await tick();
+// he walks back while still talking
+tokens[1].document.x = 300; tokens[1].document._source.x = 300;
+Hooks.callAll("refreshToken", tokens[1], { refreshPosition: true }); await runIntervals(); await speak("p2", -20);
+await runIntervals();// cues catch up with volumes on the UI's one-second tick
+check("Bob walks back into earshot: his cue turns into the full ring", indicatorOn(tokens[1])?.pvcHeard === true && indicatorOn(tokens[1]).children[0].line.width >= 3
+  && !row("p2").classList.contains("pvc-inaudible"));
 now += 1000; await speak("p2", -80);
 tokens[1].document.x = 300; tokens[1].document._source.x = 300;
 Hooks.callAll("refreshToken", tokens[1], { refreshPosition: true }); await tick();
@@ -419,6 +438,38 @@ check("Bob yelling, icon style: megaphone glyph in the icon font", indicatorOn(t
 settings.speakingIndicatorOverride = "default"; settings.whisperRange = 25;
 now += 1000; await speak("p2", -80);
 receive({ action: "voice-mode", from: "p2", mode: "normal" }); await runIntervals();
+
+// several people through one token: the GM selects Bob's token and talks while Bob does
+deliverUserUpdate(users[0], { selected_tokens: [tokens[1].document.uuid] }, "gm"); await runIntervals();
+await speak("p2", -20); await speak("gm", -20);
+const shared = indicatorOn(tokens[1])?.children[0];
+check("GM and Bob talking through Bob's token: a checkered ring in both colours, GM first as in the users list",
+  shared?.arcs?.length === 24 && shared.arcs.every((a, i) => a.color === (i % 2 ? 0x0000ff : 0xff0000)) && !shared.circles?.length,
+  JSON.stringify(shared?.arcs?.slice(0, 3)));
+check("...with no gaps: the arcs go all the way round", Math.abs(shared?.arcs?.at(-1)?.end - shared?.arcs?.[0]?.start - Math.PI * 2) < 1e-9);
+check("Alice's own token, with only her own speakers, is unaffected", !indicatorOn(tokens[0]));
+settings.speakingIndicatorOverride = "badge"; Hooks.callAll("drawToken"); await tick();
+const wedges = indicatorOn(tokens[1])?.children[0]?.arcs;
+check("badge style, two speakers: one wedge each in their colours", wedges?.length === 2 && wedges[0].fill === 0xff0000 && wedges[1].fill === 0x0000ff, JSON.stringify(wedges));
+settings.speakingIndicatorOverride = "icon"; Hooks.callAll("drawToken"); await tick();
+const sharedIcon = indicatorOn(tokens[1]);
+check("icon style, two speakers: a white glyph in a checkered rim", sharedIcon?.children.some(c => c.text && c.style.fill === 0xffffff)
+  && sharedIcon.children[0].arcs?.length === 24);
+settings.speakingIndicatorOverride = "default"; Hooks.callAll("drawToken"); await tick();
+receive({ action: "voice-mode", from: "p2", mode: "yell" }); await runIntervals(); await speak("p2", -20); await speak("gm", -20);
+const sharedYell = indicatorOn(tokens[1]);
+check("one of them yelling: the shared cue takes the loudest mode, ripple checkered too", sharedYell?.pvcMode === "yell"
+  && sharedYell.children.find(c => c.pvcRipple)?.arcs?.length === 24);
+settings.whisperRange = 50; receive({ action: "voice-mode", from: "p2", mode: "whisper" }); receive({ action: "voice-mode", from: "gm", mode: "whisper" });
+Hooks.callAll("canvasReady", canvas); await runIntervals(); await speak("p2", -20); await speak("gm", -20);
+const dots = indicatorOn(tokens[1])?.children[0];
+check("both whispering: the dots take turns between their colours", indicatorOn(tokens[1])?.pvcMode === "whisper" && dots?.circles?.length === 28
+  && dots.fills?.every((c, i) => c === (i % 2 ? 0x0000ff : 0xff0000)), JSON.stringify(dots?.fills?.slice(0, 4)));
+now += 1000; await speak("p2", -80); await speak("gm", -80);
+check("when they stop, the shared cue goes", !indicatorOn(tokens[1]));
+settings.whisperRange = 25;
+receive({ action: "voice-mode", from: "p2", mode: "normal" }); receive({ action: "voice-mode", from: "gm", mode: "normal" });
+deliverUserUpdate(users[0], { selected_tokens: [] }, "gm"); await runIntervals();
 
 // someone joining asks for the current modes; only non-Normal modes answer
 api.set_voice_mode("whisper"); await tick();

@@ -102,7 +102,9 @@ With **Directional Voice (Headphones)** on, each voice sits to your left or righ
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
-- **Speaking cues:** the players list highlights whoever is talking, dimmed if they're out of your earshot. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
+- **Speaking cues:** the players list highlights whoever is talking. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
+  - **Out of earshot:** when someone talks through a token you can see but can't hear, the token gets a thin, faint ring (or, with the icon and badge styles, a speech bubble with dots), and their row in the players list is dimmed. You can see their lips moving, but the words don't reach you. A whisper you can't hear shows nothing at all, so whispers stay private.
+  - **Several people at once:** when two or more people talk through the same token, such as the party token on a travel map, or the GM speaking through a player's token, the ring is checkered in all their colours. The badge is split into one slice per person. The cue takes the loudest of their voice modes.
 - **Voice bar:** the last row of the players list holds mic, voice mode, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
 - **Hotkeys:** every voice bar control can be bound under **Configure Controls**. They start unbound, and each button's tooltip shows its hotkey.
 - **Right-click a player** to set their volume, up to 200% (see [Louder voices](#louder-voices)). GMs can also block or allow their audio, and turn their Global Listening or Global Speaking on or off.

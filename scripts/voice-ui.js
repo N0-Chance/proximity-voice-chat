@@ -30,6 +30,12 @@ const MODE_LOOKS = {
   yell: { glyph: "\uf675", icon: "fa-solid fa-megaphone", list: "fa-solid fa-megaphone", scale: 1.25, pulse: { base: 0.75, depth: 0.25, period: 80 } }
 };
 const RIPPLE_MS = 700;
+/** Speech you can see but can't hear: the lips move, the words don't arrive. A speech bubble with "...", faint and slow. */
+const UNHEARD_LOOK = { glyph: "\uf4ad", icon: "fa-solid fa-comment-dots", scale: 0.85, pulse: { base: 0.3, depth: 0.15, period: 600 } };
+/** Quietest to loudest: several people on one token show the loudest of their modes */
+const MODE_ORDER = ["whisper", "normal", "yell"];
+/** About how many arcs a ring is cut into when several people speak through one token, so it reads as checkered */
+const RING_SEGMENTS = 24;
 
 /** How long a hotkey must be held to count as "hold to whisper/yell" rather than a tap that switches and stays */
 const HOLD_MS = 400;
@@ -201,20 +207,41 @@ const _indicators = new Map();
 let _pulse_ticker = null;
 
 /**
- * Which tokens should currently show a speaking cue: tokens that someone speaking speaks through,
- * if this client can actually hear that person (or it's your own voice)
- * @returns {Map<string, foundry.documents.User>} token UUID -> speaking user
+ * Which tokens should currently show a speaking cue, and for whom. Heard: people this client can hear, and your own
+ * voice. Unheard: people speaking through a token in earshot of nobody you speak for, shown faintly ("lips moving").
+ * A whisper you can't hear stays private and isn't listed at all. Users are in game.users order, so the colours on a
+ * shared token keep their places.
+ * @returns {Map<string, {heard: Array<foundry.documents.User>, unheard: Array<foundry.documents.User>}>} by token UUID
  */
 function _speaking_tokens() {
   const tokens = new Map();
-  for (const [user_id, state] of _speakers) {
-    if (!state.speaking) continue;
-    const user = game.users.get(user_id);
-    if (!user) continue;
-    if (!user.isSelf && !(api().get_user_volume(user_id) > 0)) continue;
-    for (const uuid of api().get_speaking_token_uuids(user)) tokens.set(uuid, user);
+  for (const user of game.users) {
+    if (!is_speaking(user.id)) continue;
+    const heard = user.isSelf || api().get_user_volume(user.id) > 0;
+    if (!heard && api().get_voice_mode(user) === "whisper") continue;
+    for (const uuid of api().get_speaking_token_uuids(user)) {
+      if (!tokens.has(uuid)) tokens.set(uuid, { heard: [], unheard: [] });
+      tokens.get(uuid)[heard ? "heard" : "unheard"].push(user);
+    }
   }
   return tokens;
+}
+
+/**
+ * What a token's cue shows. If anyone on it is heard, the cue is theirs, in the loudest of their modes; otherwise
+ * it's the faint "can't hear" cue for everyone speaking there.
+ * @param {{heard: Array<foundry.documents.User>, unheard: Array<foundry.documents.User>}} speakers
+ * @param {string} style one of SPEAKING_STYLES
+ * @returns {{heard: boolean, mode: string, colors: Array<number>, key: string}} key changes whenever the drawing would
+ */
+function _cue_for(speakers, style) {
+  const heard = speakers.heard.length > 0;
+  const users = heard ? speakers.heard : speakers.unheard;
+  const mode = heard
+    ? users.map(user => api().get_voice_mode(user)).reduce((a, b) => (MODE_ORDER.indexOf(b) > MODE_ORDER.indexOf(a) ? b : a))
+    : "normal";
+  const colors = users.map(user => Number(user.color));
+  return { heard, mode, colors, key: [style, heard ? "heard" : "unheard", mode, ...users.map((user, i) => user.id + ":" + colors[i])].join("|") };
 }
 
 function _refresh_token_indicators() {
@@ -222,18 +249,17 @@ function _refresh_token_indicators() {
   const style = _speaking_style();
   const wanted = style === "none" ? new Map() : _speaking_tokens();
   for (const [uuid, container] of _indicators) {
-    const user = wanted.get(uuid);
-    const current = user && !container.destroyed && container.parent && container.pvcStyle === style
-      && container.pvcMode === api().get_voice_mode(user);
+    const speakers = wanted.get(uuid);
+    const current = speakers && !container.destroyed && container.parent && container.pvcKey === _cue_for(speakers, style).key;
     if (current) continue;
     if (!container.destroyed) container.destroy({ children: true });
     _indicators.delete(uuid);
   }
-  for (const [uuid, user] of wanted) {
+  for (const [uuid, speakers] of wanted) {
     if (_indicators.has(uuid)) continue;
     const token = canvas.tokens.placeables.find(t => t.document.uuid === uuid);
     if (!token || token.destroyed) continue;
-    const container = _draw_indicator(token, user, style, api().get_voice_mode(user));
+    const container = _draw_indicator(token, _cue_for(speakers, style), style);
     if (container) _indicators.set(uuid, container);
   }
   _update_pulse();
@@ -259,18 +285,43 @@ function _glyph(glyph, size, color) {
 }
 
 /**
+ * Strokes a circle in one colour, or, for several, in arcs that take turns through the colours (a checkered ring)
+ * @param {PIXI.Graphics} graphics
+ * @param {number} x
+ * @param {number} y
+ * @param {number} radius
+ * @param {number} width
+ * @param {Array<number>} colors
+ */
+function _ring(graphics, x, y, radius, width, colors) {
+  if (colors.length < 2) {
+    graphics.lineStyle({ width, color: colors[0], alpha: 1 });
+    graphics.drawCircle(x, y, radius);
+    return;
+  }
+  const count = Math.ceil(RING_SEGMENTS / colors.length) * colors.length;
+  for (let i = 0; i < count; i++) {
+    // from the top, clockwise
+    const start = (i / count) * Math.PI * 2 - Math.PI / 2;
+    const end = ((i + 1) / count) * Math.PI * 2 - Math.PI / 2;
+    graphics.lineStyle({ width, color: colors[i % colors.length], alpha: 1 });
+    graphics.moveTo(x + Math.cos(start) * radius, y + Math.sin(start) * radius);
+    graphics.arc(x, y, radius, start, end);
+  }
+}
+
+/**
  * A ring that expands and fades on a loop (see _update_pulse), drawn around (0, 0) so it can scale from its centre
  * @param {number} x
  * @param {number} y
  * @param {number} radius
  * @param {number} width
- * @param {number} color
+ * @param {Array<number>} colors
  * @returns {PIXI.Graphics}
  */
-function _ripple(x, y, radius, width, color) {
+function _ripple(x, y, radius, width, colors) {
   const ripple = new PIXI.Graphics();
-  ripple.lineStyle({ width, color, alpha: 1 });
-  ripple.drawCircle(0, 0, radius);
+  _ring(ripple, 0, 0, radius, width, colors);
   ripple.position.set(x, y);
   ripple.pvcRipple = true;
   return ripple;
@@ -278,61 +329,79 @@ function _ripple(x, y, radius, width, color) {
 
 /**
  * Draws a speaking cue as a child of the token, so it follows the token and is hidden whenever the token is.
- * Whisper is smaller and softer (a dotted ring); Yell is bigger, faster, and ripples outward.
+ * Whisper is smaller and softer (a dotted ring); Yell is bigger, faster, and ripples outward. Speech you can't hear
+ * is a thin ring, or a speech bubble with "...", pulsing faintly. Several people at once share the cue's colours.
  * @param {foundry.canvas.placeables.Token} token
- * @param {foundry.documents.User} user
+ * @param {ReturnType<typeof _cue_for>} cue
  * @param {string} style one of SPEAKING_STYLES
- * @param {string} mode a value of VOICE_MODES
  * @returns {PIXI.Container | null}
  */
-function _draw_indicator(token, user, style, mode) {
-  const color = Number(user.color);
-  const look = MODE_LOOKS[mode] ?? MODE_LOOKS.normal;
+function _draw_indicator(token, cue, style) {
+  const { heard, mode, colors } = cue;
+  const several = colors.length > 1;
+  const look = heard ? (MODE_LOOKS[mode] ?? MODE_LOOKS.normal) : UNHEARD_LOOK;
   const w = token.w, h = token.h;
   const r = Math.max(w, h) / 2;
   const container = new PIXI.Container();
   container.pvcStyle = style;
   container.pvcMode = mode;
+  container.pvcHeard = heard;
+  container.pvcKey = cue.key;
+  container.pvcPulse = look.pulse;
   container.eventMode = "none";
   if (style === "ring") {
     const width = Math.max(3, r * 0.08);
     const ring = new PIXI.Graphics();
-    if (mode === "whisper") {
+    if (!heard) {
+      // a thin line where the ring would be: someone's talking there, but it doesn't reach you
+      _ring(ring, w / 2, h / 2, r + width, Math.max(1.5, r * 0.025), colors);
+    } else if (mode === "whisper") {
       // a dotted ring: quieter, and recognisable without relying on colour
-      const dots = 28, dot = Math.max(1.5, width * 0.45);
-      ring.beginFill(color, 1);
+      const dots = Math.max(colors.length, Math.round(28 / colors.length) * colors.length), dot = Math.max(1.5, width * 0.45);
       for (let i = 0; i < dots; i++) {
-        const angle = (i / dots) * Math.PI * 2;
+        const angle = (i / dots) * Math.PI * 2 - Math.PI / 2;
+        ring.beginFill(colors[i % colors.length], 1);
         ring.drawCircle(w / 2 + Math.cos(angle) * (r + width), h / 2 + Math.sin(angle) * (r + width), dot);
+        ring.endFill();
       }
-      ring.endFill();
     } else {
       const ring_width = mode === "yell" ? width * 1.6 : width;
-      ring.lineStyle({ width: ring_width, color, alpha: 1 });
-      ring.drawCircle(w / 2, h / 2, r + ring_width);
+      _ring(ring, w / 2, h / 2, r + ring_width, ring_width, colors);
     }
     container.addChild(ring);
-    if (mode === "yell") container.addChild(_ripple(w / 2, h / 2, r + width * 2.5, width, color));
+    if (heard && mode === "yell") container.addChild(_ripple(w / 2, h / 2, r + width * 2.5, width, colors));
   } else if (style === "icon") {
     const size = r * 0.6 * look.scale;
     const back = new PIXI.Graphics();
     back.beginFill(0x000000, 0.55).drawCircle(w / 2, h / 2, size * 0.7).endFill();
+    // several people: a white glyph inside a checkered rim in their colours
+    if (several) _ring(back, w / 2, h / 2, size * 0.7, Math.max(2, size * 0.08), colors);
     container.addChild(back);
-    const glyph = _glyph(look.glyph, size, color);
+    const glyph = _glyph(look.glyph, size, several ? 0xffffff : colors[0]);
     glyph.position.set(w / 2, h / 2);
     container.addChild(glyph);
-    if (mode === "yell") container.addChild(_ripple(w / 2, h / 2, size * 0.75, Math.max(2, size * 0.06), color));
+    if (heard && mode === "yell") container.addChild(_ripple(w / 2, h / 2, size * 0.75, Math.max(2, size * 0.06), colors));
   } else if (style === "badge") {
     const badge_r = Math.max(8, r * 0.26) * look.scale;
     const x = w - badge_r * 0.6, y = badge_r * 0.6;
     const back = new PIXI.Graphics();
-    back.lineStyle({ width: 2, color: 0x000000, alpha: 0.8 });
-    back.beginFill(color, 1).drawCircle(x, y, badge_r).endFill();
+    if (several) {
+      // checkering is too small to read on a badge, so it's split into one wedge per person
+      for (let i = 0; i < colors.length; i++) {
+        const start = (i / colors.length) * Math.PI * 2 - Math.PI / 2;
+        const end = ((i + 1) / colors.length) * Math.PI * 2 - Math.PI / 2;
+        back.beginFill(colors[i], 1).moveTo(x, y).arc(x, y, badge_r, start, end).lineTo(x, y).endFill();
+      }
+      back.lineStyle({ width: 2, color: 0x000000, alpha: 0.8 }).drawCircle(x, y, badge_r);
+    } else {
+      back.lineStyle({ width: 2, color: 0x000000, alpha: 0.8 });
+      back.beginFill(colors[0], 1).drawCircle(x, y, badge_r).endFill();
+    }
     container.addChild(back);
     const glyph = _glyph(look.glyph, badge_r * 1.1, 0xffffff);
     glyph.position.set(x, y);
     container.addChild(glyph);
-    if (mode === "yell") container.addChild(_ripple(x, y, badge_r * 1.15, 2, color));
+    if (heard && mode === "yell") container.addChild(_ripple(x, y, badge_r * 1.15, 2, colors));
   } else {
     return null;
   }
@@ -347,7 +416,7 @@ function _update_pulse() {
       const now = Date.now();
       for (const container of _indicators.values()) {
         if (container.destroyed) continue;
-        const { base, depth, period } = (MODE_LOOKS[container.pvcMode] ?? MODE_LOOKS.normal).pulse;
+        const { base, depth, period } = container.pvcPulse ?? MODE_LOOKS.normal.pulse;
         container.alpha = base + depth * Math.sin(now / period);
         for (const child of container.children) {
           if (!child.pvcRipple) continue;
@@ -514,8 +583,9 @@ function _update_player_row(user_id) {
   }
   const user = game.users.get(user_id);
   const mode = user ? api().get_voice_mode(user) : "normal";
-  icon.className = "pvc-speaking-icon " + (MODE_LOOKS[mode] ?? MODE_LOOKS.normal).list;
   const audible = !user || user.isSelf || api().get_user_volume(user_id) > 0;
+  // out of earshot: the same "lips moving" bubble as on the token
+  icon.className = "pvc-speaking-icon " + (audible ? (MODE_LOOKS[mode] ?? MODE_LOOKS.normal).list : UNHEARD_LOOK.icon);
   // a whisper you can't hear stays private: no cue at all. Other speech out of earshot shows dimmed.
   const speaking = is_speaking(user_id) && (audible || mode !== "whisper");
   row.classList.toggle("pvc-speaking", speaking);
