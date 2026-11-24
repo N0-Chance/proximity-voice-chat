@@ -218,6 +218,134 @@ const scenarios = [
   { name: "answerer reloads after connecting", connect_ms: 2000, offsets: { a: 0, b: 3000 }, reload: { who: "b", at: 60000 } },
 ];
 
+// --- Foundry 14.369 voice detection (AVMaster) and SimplePeerAVClient's mute handling, as far as muting goes.
+// Speaking is simplified to "level above the threshold"; the rest follows foundry.mjs.
+const levelReports = new Map();
+class MuteClient {
+  constructor(master) {
+    this.master = master;
+    this.settings = master.settings;
+    this.audioBroadcastEnabled = false;
+    const track = () => ({ enabled: true });
+    this.localStream = { tracks: [track()], getAudioTracks() { return this.tracks; } };
+    // Foundry's levels stream is a clone, so muting (which disables the local tracks) leaves its tracks alone
+    this.levelsStream = { tracks: [track()], getAudioTracks() { return this.tracks; } };
+  }
+  get isMuted() { return this.settings.client.users[game.user.id]?.muted; }
+  get isVoicePTT() { return this.settings.client.voice.mode === "ptt"; }
+  get isVoiceActivated() { return this.settings.client.voice.mode === "activity"; }
+  getLevelsStreamForUser() { return this.levelsStream; }
+  toggleAudio(enabled) {
+    if (!this.localStream) return;
+    if (!this.audioBroadcastEnabled || this.isVoicePTT) return;
+    return this.toggleBroadcast(enabled);
+  }
+  toggleBroadcast(enabled) {
+    this.audioBroadcastEnabled = enabled;
+    for (const t of this.localStream.getAudioTracks()) t.enabled = enabled;
+  }
+  async onSettingsChanged(changed) {
+    const keys = new Set(Object.keys(flatten(changed)));
+    const modeChange = ["client.voice.mode", `client.users.${game.user.id}.muted`].some(k => keys.has(k));
+    if (modeChange) {
+      const isAlways = this.settings.client.voice.mode === "always";
+      this.toggleAudio(isAlways && this.master.canUserShareAudio(game.user.id));
+      this.master.broadcast(isAlways);
+      this.master._initializeUserVoiceDetection(changed.client.voice?.mode);
+    }
+  }
+}
+class AVMaster {
+  constructor(mode) {
+    this.settings = { client: { voice: { mode, activityThreshold: -45 }, users: { a: { muted: false } } } };
+    this.broadcasting = false;
+    this._speakingData = { speaking: false };
+    this.client = new MuteClient(this);
+  }
+  _initializeUserVoiceDetection(mode) {
+    game.audio.stopLevelReports(game.user.id);
+    if (!["always", "activity"].includes(mode)) return;
+    this.activateVoiceDetection(this.client.getLevelsStreamForUser(game.user.id));
+  }
+  activateVoiceDetection(stream) {
+    game.audio.stopLevelReports(game.user.id);
+    if (!stream || !stream.getAudioTracks().some(t => t.enabled)) return;
+    game.audio.startLevelReports(game.user.id, stream, db => this.onAudioLevel(db));
+  }
+  onAudioLevel(db) {
+    const wasSpeaking = this._speakingData.speaking;
+    const isSpeaking = db >= this.settings.client.voice.activityThreshold && !this.client.isMuted;
+    this._speakingData.speaking = isSpeaking;
+    if (isSpeaking === wasSpeaking) return;
+    if (this.client.isVoiceActivated) return this.broadcast(isSpeaking);
+  }
+  canUserShareAudio(id) {
+    const user = this.settings.client.users[id];
+    return !!user && !user.muted;
+  }
+  broadcast(intent) {
+    this.broadcasting = intent && this.canUserShareAudio(game.user.id);
+    this.client.toggleBroadcast(this.broadcasting);
+  }
+  onSettingsChanged(changed) {
+    const sharing = changed.client?.users?.[game.user.id] ?? {};
+    if ("muted" in sharing) this.client.toggleAudio(this.canUserShareAudio(game.user.id));
+    this.client.onSettingsChanged(changed);
+  }
+}
+const flatten = (obj, prefix = "") => Object.entries(obj).reduce((out, [k, v]) =>
+  (v && typeof v === "object" ? Object.assign(out, flatten(v, prefix + k + ".")) : (out[prefix + k] = v), out), {});
+
+/**
+ * Talks, toggles mute (as the hotkey does: a client setting change), and talks again
+ * @param {string} mode Foundry's voice broadcasting mode
+ * @param {boolean} mute_while_talking toggle mute in the middle of a sentence
+ * @returns {{before: boolean, whileMuted: boolean, after: boolean, detecting: boolean}} whether the mic was open
+ */
+function muteScenario(mode, mute_while_talking = false) {
+  const saved = { webrtc: game.webrtc, user: game.user, audio: game.audio };
+  levelReports.clear();
+  game.user = { id: "a" };
+  game.audio = { startLevelReports: (id, _stream, fn) => levelReports.set(id, fn), stopLevelReports: id => levelReports.delete(id) };
+  const master = new AVMaster(mode);
+  game.webrtc = master;
+  const level = db => levelReports.get("a")?.(db);
+  const ptt = (down) => { if (mode === "ptt") master.broadcast(down); };
+  const setMuted = (muted) => {
+    master.settings.client.users.a.muted = muted;
+    master.onSettingsChanged({ client: { users: { a: { muted } } } });
+  };
+  // Foundry's AVMaster.connect: start detection, set the outbound tracks, declare the broadcast intent
+  master._initializeUserVoiceDetection(mode);
+  master.client.toggleAudio(mode === "always");
+  master.broadcast(mode === "always");
+  ptt(true); level(-20);
+  const before = master.broadcasting;
+  if (!mute_while_talking) { level(-80); ptt(false); }
+  setMuted(true);
+  ptt(true); level(-20);
+  const whileMuted = master.broadcasting;
+  level(-80); ptt(false);
+  setMuted(false);
+  if (mute_while_talking) level(-20);// still talking when unmuting
+  level(-80);
+  ptt(true); level(-20);
+  const after = master.broadcasting;
+  const detecting = levelReports.has("a");
+  Object.assign(game, saved);
+  return { before, whileMuted, after, detecting };
+}
+const muteCases = [
+  { name: "Voice Activation: mute, unmute, talk", mode: "activity", want: { after: true, detecting: true } },
+  { name: "Voice Activation: mute in mid-sentence, unmute, talk", mode: "activity", talking: true, want: { after: true, detecting: true } },
+  { name: "Always On: mute, unmute, talk", mode: "always", want: { after: true } },
+  { name: "Push-to-talk: mute, unmute, talk (no detector needed)", mode: "ptt", want: { after: true, detecting: false } },
+];
+foundry.av.AVMaster = AVMaster;
+const runMuteCases = () => muteCases.map(c => ({ c, r: muteScenario(c.mode, c.talking) }));
+const muteOk = ({ c, r }) => r.before && !r.whileMuted && Object.entries(c.want).every(([k, v]) => r[k] === v);
+const fmtMute = r => "open before " + r.before + ", while muted " + r.whileMuted + ", after " + r.after + ", detecting " + r.detecting;
+
 const fmt = r => (r.final_up ? "connected" : "NOT connected") +
   (r.connectedAt > 0 ? " (first at " + r.connectedAt / 1000 + "s)" : r.connectedAt === -1 ? " (dropped)" : "") +
   (r.reconnectedAt ? ", back after reload at " + r.reconnectedAt / 1000 + "s" : "") +
@@ -226,6 +354,8 @@ const fmt = r => (r.final_up ? "connected" : "NOT connected") +
 console.log("--- unpatched Foundry 14.369");
 const baseline = [];
 for (const s of scenarios) { const r = await simulate(s); baseline.push(r); console.log("  " + s.name + ": " + fmt(r)); }
+const muteBaseline = runMuteCases();
+for (const { c, r } of muteBaseline) console.log("  " + c.name + ": " + fmtMute(r));
 
 await import(process.argv[2] ?? new URL("../scripts/proximity-voice-chat.js", import.meta.url).href);
 Hooks.callAll("init");
@@ -241,7 +371,14 @@ for (const s of scenarios) {
   if (!ok) failures++;
   console.log((ok ? "  ok   " : "  FAIL ") + s.name + ": " + fmt(r));
 }
-const reproduced = baseline.some(r => !r.final_up);
+for (const result of runMuteCases()) {
+  const ok = muteOk(result);
+  if (!ok) failures++;
+  console.log((ok ? "  ok   " : "  FAIL ") + result.c.name + ": " + fmtMute(result.r));
+}
+const muteReproduced = !muteOk(muteBaseline[0]) && muteBaseline.slice(2).every(muteOk);
+console.log(muteReproduced ? "baseline reproduces the mute bug, and only in Voice Activation" : "WARNING: baseline did not reproduce the mute bug as expected");
+const reproduced = baseline.some(r => !r.final_up) && muteReproduced;
 console.log(reproduced ? "baseline reproduces the bug" : "WARNING: baseline did not reproduce the bug");
 console.log(failures ? failures + " FAILURES" : "ALL PASSED");
 process.exit(failures || !reproduced ? 1 : 0);

@@ -110,6 +110,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 ### Reliability fixes
 - **Voice connection drops:** Foundry's voice chat replaces any connection that takes more than about 8 seconds to set up, on both ends at once, so slow connections never finish. The module works around this. Symptoms in the console are `Called in wrong state` and `order of m-lines ... doesn't match`. Someone who reloads reconnects within seconds.
 - **Deafen:** Foundry 14.369's own deafen button does nothing (a typo in its camera template). The module applies deafen itself.
+- **Mute in Voice Activation:** in Foundry 14.369, muting and unmuting in Voice Activation mode switches off the detector that opens your mic, so nobody hears you again until you reload. It happens with Foundry's own mute button too. The module restarts the detector.
 - **Fixes to upstream's proximity logic:** see [Differences from upstream](#differences-from-upstream).
 
 ## Settings
@@ -278,6 +279,8 @@ The upstream proof of concept (at the time of writing) was largely solid and wel
   - Why: a browser that offers no network addresses, or can't reach the relay, fails silently. Speaking cues still light up, because Foundry's speaking signal travels over its server connection, so it looks like everything works except the audio.
 - **Deafen works.**
   - Why: Foundry 14.369's camera template reads `mutaAll` instead of `muteAll`, so its deafen button does nothing.
+- **Unmuting works in Voice Activation.**
+  - Why: when only the mute setting changes, Foundry 14.369 restarts voice detection with the voice mode from the list of changes, which doesn't include it, so detection stops for good. In Voice Activation that detector is what opens the mic, so after unmuting you stayed silent until a reload. The module fills in the current mode.
 
 ### Interface
 - **The camera dock is hidden by default**, with speaking cues and a voice bar in the players list.
@@ -363,5 +366,4 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 
 ## Development
 * Tests: `node test/smoke.mjs`, `node test/peers.mjs`, `node test/ui.mjs`, `node test/propagation.mjs`, and `node test/audio.mjs`. They stub just enough of Foundry, and of the browser's Web Audio, to run in Node.
-* [TESTING.md](TESTING.md) is the checklist I run at the table for what Node can't hear: how voices actually sound.
 * Release: `tools/release.sh <version> "<what changed>"` sets the version everywhere, runs the tests, commits, tags, and pushes. The tag starts `.github/workflows/release.yml`, which publishes `module.json` and `module.zip` as a GitHub release.

@@ -397,6 +397,7 @@ Hooks.on("init", async () => {
   _register_propagation_settings();
   set_voice_audio_listener(_on_audio_path_change);
   _patch_simplepeer();
+  _patch_voice_detection();
   register_voice_ui_settings();
   register_diagnostics();
   // exposed api for macros
@@ -1736,6 +1737,31 @@ function _sdp_fingerprint(sdp) {
  */
 function _is_peer_up(peer) {
   return peer.connected || peer._connecting || peer._pc?.connectionState === "connected";
+}
+
+/** Marks Foundry methods this module has already wrapped */
+const _PATCHED = Symbol("proximity-voice-chat.patched");
+
+/**
+ * Works around Foundry 14.369 leaving Voice Activation dead after a mute toggle. When only the mute setting
+ * changes, SimplePeerAVClient.onSettingsChanged restarts voice detection with `changed.client.voice?.mode`, which is
+ * undefined, so detection is stopped and never started again. In Voice Activation that detector is the only thing
+ * that opens the microphone, so after unmuting nobody hears you until a reload. A missing mode now means the
+ * current one. Foundry's own mute button, the voice bar, and the hotkey all go through this path.
+ */
+function _patch_voice_detection() {
+  const proto = foundry.av?.AVMaster?.prototype;
+  const original = proto?._initializeUserVoiceDetection;
+  if (typeof original !== "function") {
+    console.warn(MODULE_ID + " | AVMaster voice detection not found, mute fix not applied");
+    return;
+  }
+  if (original[_PATCHED]) return;
+  const patched = function (mode) {
+    return original.call(this, mode ?? this.settings?.client?.voice?.mode);
+  };
+  patched[_PATCHED] = true;
+  proto._initializeUserVoiceDetection = patched;
 }
 
 /**
