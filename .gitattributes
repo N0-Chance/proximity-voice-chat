@@ -1,1 +1,2 @@
 packs/** binary
+*.wasm binary

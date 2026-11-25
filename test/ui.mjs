@@ -135,8 +135,11 @@ class FakeApplicationV2 {
     this.content ??= new El("section");
     this._replaceHTML(await this._renderHTML(context, {}), this.content, {});
     this.rendered = true;
+    // like Foundry: after each render, then on closing
+    this._onRender?.(context, {});
     return this;
   }
+  async close() { this._onClose?.({}); this.closed = true; }
   async click(action) { await this.options.actions[action].call(this, {}, null); }
 }
 const menus = new Map();
@@ -358,7 +361,7 @@ const activeBox = ui.players.element.querySelector("#players-active");
 check("voice bar is the last row of the active players box, not the inactive one", !!bar && activeBox.children.at(-1) === bar && !ui.players.element.querySelector("#players-inactive").children.includes(bar));
 check("voice bar is a list item inside that list", bar.tagName === "LI");
 const actions = bar.children.map(b => b.dataset.pvcAction).join(",");
-check("player bar has mic, voice mode, deafen, settings only", actions === "mic,mode,deafen,settings", actions);
+check("player bar has mic, voice mode, deafen, settings, mic setup only", actions === "mic,mode,deafen,settings,micSetup", actions);
 const button = a => bar.querySelector(`button[data-pvc-action="${a}"]`);
 check("mic button shows active (unmuted)", button("mic").classList.contains("active"));
 await button("mic").dispatch("click");
@@ -372,6 +375,33 @@ await button("deafen").dispatch("click"); await runIntervals();
 check("undeafen restores volumes", media.gm?.volume === 1, String(media.gm?.volume));
 await button("settings").dispatch("click");
 check("settings button opens Foundry's A/V config", configOpened === 1);
+
+// --- Mic Setup: the microphone cleanup's settings, from the voice bar
+{
+  const before = windows.length;
+  await button("micSetup").dispatch("click"); await tick();
+  const win = windows[before];
+  check("the Mic Setup button opens Mic Setup", win?.constructor?.name === "MicSetup" && !!win.rendered, win?.constructor?.name);
+  check("...which is also a settings menu button everyone can use", menus.get("micSetup")?.restricted === false && menus.get("micSetup")?.type === win?.constructor);
+  const text = allText(win.content);
+  check("...says in words what the cleanup is doing", /proximity-voice-chat\.MicSetup\.Status\.\w/.test(text), text.slice(0, 160));
+  check("...offers the GM's default, on, and off", win.content.querySelectorAll("option").map(o => o.value).join(",") === "default,on,off");
+  const boxes = () => win.content.querySelectorAll("input").filter(i => i.type === "checkbox");
+  const slider = () => win.content.querySelectorAll("input").find(i => i.type === "range");
+  check("...a noise filter and an automatic gate, both on", boxes().length === 2 && boxes().every(b => b.checked));
+  check("...and a strictness slider from Relaxed to Strict", slider()?.min === "1" && slider()?.max === "5" && slider()?.value === "3");
+  slider().value = "4"; await slider().dispatch("change");
+  check("moving the slider saves the strictness", settings.micStrictness === 4);
+  boxes()[1].checked = false; await boxes()[1].dispatch("change"); await tick();
+  check("unticking Automatic turns the slider into a loudness threshold in dB", settings.micGateAuto === false && slider()?.min === "-70" && slider()?.value === "-45");
+  const meter = win.content.querySelector(".pvc-mic-meter-marker");
+  check("...whose line sits on the meter where the threshold is", meter?.style.left === "43.75%", meter?.style.left);
+  boxes()[1].checked = true; await boxes()[1].dispatch("change"); await tick();
+  await game.settings.set("proximity-voice-chat", "micStrictness", 3);
+  const hear = win.content.querySelectorAll("button").find(b => allText(b).includes("MicSetup.Hear"));
+  check("Hear Yourself is greyed out while the cleanup isn't running", hear?.disabled === true);
+  await win.close();
+}
 
 // --- hotkeys
 check("seven hotkeys registered, unbound by default", keybindings.size === 7 && [...keybindings.values()].every(k => k.editable.length === 0), [...keybindings.keys()].join(","));
@@ -589,7 +619,7 @@ check("back under 100% it's Foundry's own volume again", Math.abs(rtc.client.use
 becomeUser("gm");
 renderPlayers();
 const gmBar = ui.players.element.querySelector(".pvc-voice-bar");
-check("GM bar adds Global Listen and Global Speak", gmBar.children.map(b => b.dataset.pvcAction).join(",") === "mic,mode,deafen,settings,listen,speak");
+check("GM bar adds Global Listen and Global Speak", gmBar.children.map(b => b.dataset.pvcAction).join(",") === "mic,mode,deafen,settings,micSetup,listen,speak");
 const gmButton = a => gmBar.querySelector(`button[data-pvc-action="${a}"]`);
 check("GM toggles start active (narrator defaults)", gmButton("listen").classList.contains("active") && gmButton("speak").classList.contains("active"));
 await gmButton("listen").dispatch("click"); await tick();

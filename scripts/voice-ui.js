@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "2.1.2";
+export const UI_SCRIPT_VERSION = "2.2.0";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -626,6 +626,8 @@ const VOICE_ACTIONS = {
   mode: { keybinding: null, label: "proximity-voice-chat.UI.VoiceMode", gm: false, run: () => _cycle_voice_mode() },
   deafen: { keybinding: "toggleDeafen", label: "proximity-voice-chat.UI.Deafen", gm: false, run: () => _toggle_deafen() },
   settings: { keybinding: "openAVSettings", label: "proximity-voice-chat.UI.AVSettings", gm: false, run: () => game.webrtc.config.render({ force: true }) },
+  // the microphone cleanup's settings, with a live meter
+  micSetup: { keybinding: null, label: "proximity-voice-chat.UI.MicSetup", gm: false, run: () => api().open_mic_setup() },
   listen: { keybinding: "toggleGlobalListen", label: "proximity-voice-chat.UI.globalListen.Hover", gm: true, run: () => api().toggle_global_listener() },
   speak: { keybinding: "toggleGlobalSpeak", label: "proximity-voice-chat.UI.globalSpeak.Hover", gm: true, run: () => api().toggle_global_speaker() }
 };
@@ -726,6 +728,7 @@ const VOICE_ICONS = {
   mode: MODE_LOOKS.normal.icon,
   deafen: "fa-solid fa-headphones",
   settings: "fa-solid fa-gear",
+  micSetup: "fa-solid fa-sliders",
   listen: "fa-solid fa-podcast",
   speak: "fa-solid fa-bullhorn"
 };

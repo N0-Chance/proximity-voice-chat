@@ -1,7 +1,7 @@
 # Proximity Voice Chat
 Turns Foundry VTT's built-in voice chat into proximity voice chat: you hear other players louder the closer their tokens are to yours. Walls and closed doors muffle voices instead of cutting them off, and sound carries around corners.
 
-This is a fork of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) (1.1.0) for Foundry v14, with fixes, GM narrator controls, a replacement for the camera dock, and (from 2.0) louder voices and sound that travels through and around walls. Upstream has [a video showcase](https://www.youtube.com/watch?v=jV3ZPuTRQKw) of the original features.
+This is a fork of [MrCrackerplays/proximity-voice-chat](https://github.com/MrCrackerplays/proximity-voice-chat) (1.1.0) for Foundry v14, with fixes, GM narrator controls, a replacement for the camera dock, (from 2.0) louder voices and sound that travels through and around walls, and (from 2.2) a noise filter and voice gate for every microphone. Upstream has [a video showcase](https://www.youtube.com/watch?v=jV3ZPuTRQKw) of the original features.
 
 Differences from upstream (and why) can be found [here](#differences-from-upstream).
 
@@ -99,6 +99,43 @@ With **Directional Voice (Headphones)** on, each voice sits to your left or righ
 - **Directional Voice Strength** sets how far to the side a voice can go. At 100%, a voice directly to your left is in your left ear only.
 - It needs Advanced Voice Audio, and headphones to make sense.
 
+### Microphone cleanup
+Each player's microphone goes through a noise filter and a voice gate in their own browser before it's sent. Their voice goes through untouched, and breathing, drinks, mouth noises, keyboards, fans, the room and the birds outside stay out.
+- **Why:** with **Always Enabled**, Foundry sends everything the microphone hears. **Voice Activation** isn't much better:
+  - It reacts to the loudest single pitch, so a bird counts as much as a voice.
+  - It waits for about 150 ms of sound before opening, so first syllables are lost.
+  - It cuts off hard half a second after the last loud moment, so word endings are lost.
+  - Its threshold slider only changes how loud you have to be, not what counts as a voice.
+- **The noise filter** is RNNoise, a small open-source filter trained on speech (the one Jitsi Meet uses). It removes what isn't a voice, and every 10 ms it says how sure it is that it's hearing one.
+- **The gate** sends sound only while you're speaking:
+  - It opens on speech, not loudness. Breathing, birdsong, clicks and typing don't open it, even when they're as loud as your voice.
+  - It learns your room's background level while you're quiet, and your speaking level while you talk. Another voice in the room, or a TV, is too quiet to open it.
+  - It decides about 30 ms ahead of what it sends, so first syllables come out whole.
+  - It stays open through short pauses and fades out instead of cutting off, so word endings survive.
+- **Your voice mode:**
+  - **Always Enabled** and **Voice Activation** now behave the same: the gate decides when you're heard. In Voice Activation it replaces Foundry's own detector.
+  - **Push-to-talk:** the key decides, so only the noise filter applies.
+  - **Whisper:** whispers don't sound like speech to the filter, so while you're in Whisper mode the gate asks for less and lets some unfiltered sound through.
+- **Mic Setup** (the sliders button on the voice bar, or **Configure Settings → Proximity Voice Chat**) is each player's own:
+  - The cleanup on, off, or following the GM's default.
+  - **Remove background noise:** untick it if your voice sounds wrong to you; the gate still works.
+  - **Automatic**, with a **Strictness** slider from Relaxed to Strict. If quiet words get lost, move towards Relaxed. If other voices in your room get through, move towards Strict.
+  - **Manual:** untick Automatic, and the slider becomes a loudness threshold drawn over a live meter.
+  - **Hear yourself** plays your cleaned-up microphone back to you for 30 seconds, so you hear what everyone else hears.
+- **The GM sets the default** with **Microphone Cleanup for Players**. It's on unless the GM turns it off, and each player can still choose for themselves.
+- **What it costs:**
+  - Your voice reaches others about 50 ms later, roughly one video frame.
+  - About 12% of one CPU core on each player's computer.
+  - A 3.6 MB file each browser downloads once.
+- **It starts on your first click or key press after the page loads.** Browsers don't let a page process audio before that, so until then your microphone is sent as it is. Already-connected players get the cleaned-up voice straight away, without reconnecting.
+- **A browser that can't run it falls back by itself** and sends the microphone as it is. Voice Diagnostics shows each player's state and why.
+- **How it was tested:** recorded speech, mixed with breathing, birdsong, clicks, typing, a whisper and a voice from across the room, was played as the microphone in Chrome and Firefox and sent over a real voice connection.
+  - Speech came through unchanged.
+  - Breathing, birdsong, clicks and typing were silenced in both browsers: at least 72 dB quieter in Chrome, and completely silent in Firefox.
+  - The voice from across the room was blocked.
+  - A whisper lost about 25 dB in Normal mode and about 6 dB in Whisper mode.
+- **Singing and instruments** may be treated as noise, since the filter is trained on speech. For a bard's song, untick **Remove background noise** or switch the cleanup off for a moment.
+
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
@@ -110,7 +147,7 @@ The camera dock is hidden by default. Everything it did lives in the players lis
   - A voice that drops for a moment and comes back (Foundry replacing a connection) isn't announced. Someone whose audio stops while they stay in Foundry is announced as leaving after 15 seconds; someone who closes Foundry, straight away.
   - Someone without a microphone sends no audio, so they're never announced.
   - There's no chime while you've deafened yourself; the pop-up still shows.
-- **Voice bar:** the last row of the players list holds mic, voice mode, deafen, and audio/video settings, plus Global Listening and Global Speaking for GMs.
+- **Voice bar:** the last row of the players list holds mic, voice mode, deafen, audio/video settings, and Mic Setup, plus Global Listening and Global Speaking for GMs.
 - **Hotkeys:** every voice bar control can be bound under **Configure Controls**. They start unbound, and each button's tooltip shows its hotkey.
 - **Right-click a player** to set their volume, up to 200% (see [Louder voices](#louder-voices)). GMs can also block or allow their audio, and turn their Global Listening or Global Speaking on or off.
 
@@ -148,6 +185,8 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 | Speaking Cue Threshold (dB) | Client | −45 | How loud a voice must be to show a cue; raise it if background noise lights people up |
 | Join and Leave Alerts | Client | Chime and pop-up | What you get when someone joins or leaves voice: chime and pop-up, chime only, pop-up only, or off |
 | Join and Leave Chime Volume | Client | 50 | How loud the chime is, in percent |
+| Microphone Cleanup for Players | World | On | Players' microphones go through the noise filter and voice gate unless they choose otherwise |
+| Microphone Cleanup | Client | GM's default | Your own choice: the GM's default, on, or off; the rest is in Mic Setup |
 | Fix Voice Connection Drops | World | On | The connection workaround above; everyone must reload after changing it |
 | Debug Logging | Client | Off | Logs every volume change, and why, to the browser console |
 
@@ -170,6 +209,7 @@ The token's **Proximity** tab holds its speaker list, listen list, and radius. T
 - **One row per player** says whether you can hear them and why not, so "out of range" (normal) is distinct from "no voice connection" (a problem). It also says whether the connection is direct or relayed, and checks audio in **both directions**: whether theirs reaches you, and whether yours reaches them. A user who sends no audio at all, such as a recording client without a microphone, is shown as such rather than as a fault.
 - **How each player sounds:** under their status, a row says how their voice reaches you, e.g. "around a corner (route 14 tiles, 1 bend)" or "through 1 closed door (muffled 50%)", and what the audio path is doing to it: volume, filter and left/right placement.
 - **Which audio path the browser is on:** advanced or old, with the boost, and if it's the old one, why.
+- **Microphone cleanup:** whether it's on, how it's set, how much of the time it's been sending, and if it isn't working, why.
 - **Hidden users:** if you've hidden someone (Foundry's "Hide User"), their row says so and offers **Show Again**. A GM viewing a player's report gets **Ask to Show Again**, which makes that player's browser show them again, with a notice to the player.
 - **Buttons:**
   - **Run Again**
@@ -200,6 +240,8 @@ game.modules.get("proximity-voice-chat").api.diagnose()
 It prints one row per other user. Each row shows their current volume and why, whether your voice connection to them really finished, and whether it runs **direct** or **relayed**. It also shows the state of their audio. Above the table, it lists your relay server and the types of network address your browser offers.
 
 - **You can hear someone but they can't hear you** (or the other way round): the one who can't hear has probably hidden the other. Foundry then connects but plays none of their audio, and with the camera dock hidden that's invisible. Right-click the person in the players list and choose **Show User**, or use **Show Again** in Voice Diagnostics.
+- **Someone's quiet words or word endings get lost:** in their Mic Setup, move **Strictness** towards Relaxed. If their voice sounds odd, they can untick **Remove background noise**. To rule the cleanup out entirely, set it to Off.
+- **Breathing or room noise still gets through for someone:** check that their cleanup is on in Voice Diagnostics. If it's waiting for a click, they should click anywhere on the page. If other voices in their room get through, they should move **Strictness** towards Strict.
 - **Everyone is too quiet:** raise **Voice Boost**. If one person is quiet, right-click them and raise their Voice Volume, up to 200%.
 - **No boost, or walls make voices quieter instead of muffled, on one device:** that browser is on the old audio path. Voice Diagnostics says why: "Use the Old Audio Path on This Device" is on, the page hasn't been clicked yet, or advanced audio failed there. After a failure, switching that setting on and off again makes the browser try again, and so does choosing another output device if the device was the cause.
 - **Echo of the table's own voices:** someone is on speakers. They should use headphones, or switch on "Use the Old Audio Path on This Device".
@@ -292,6 +334,13 @@ The upstream proof of concept (at the time of writing) was largely solid and wel
 - **Unmuting works in Voice Activation.**
   - Why: when only the mute setting changes, Foundry 14.369 restarts voice detection with the voice mode from the list of changes, which doesn't include it, so detection stops for good. In Voice Activation that detector is what opens the mic, so after unmuting you stayed silent until a reload. The module fills in the current mode.
 
+### Microphone
+- **Microphone cleanup, which upstream doesn't have:** a noise filter and a voice gate on each player's microphone, as described in [Microphone cleanup](#microphone-cleanup).
+  - Why: at my table, Always Enabled sent breathing, drinks and birds to everyone. Foundry's Voice Activation clipped the start and end of what people said, and still let noise through, so several players chose Always Enabled anyway.
+  - How: the module swaps the cleaned-up track into Foundry's own outgoing stream, and swaps it back whenever the cleanup can't run, so Foundry still owns the microphone, muting and device changes.
+- **In Voice Activation, the module's gate decides when you transmit**, instead of Foundry's detector.
+  - Why: Foundry's detector measures the loudest single pitch over 50 ms, needs 3 of its last 10 readings above the threshold before it opens, and cuts off when all 10 are below.
+
 ### Interface
 - **The camera dock is hidden by default**, with speaking cues and a voice bar in the players list.
   - Why: for audio-only proximity play, the dock takes space and shows nothing useful. It's moved off-screen rather than removed, because voice audio plays through its video elements.
@@ -374,6 +423,12 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 * `get_speaking_token_uuids(user: User): string[]`: the tokens in the current scene that user speaks through
 * `diagnose(): Promise<object[]>`: see [Troubleshooting](#troubleshooting)
 
+### Microphone cleanup
+* `get_mic_status(): object`: what the cleanup is doing in this browser. `state` is `active`, `off`, `no-mic`, `starting`, `waiting` (for a click) or `failed`, with `reason` (`unsupported`, `worklet`, `rate`, `resume` or `error`) and `detail` when it failed. It also gives `filter` (whether the noise filter loaded), `gate` (`auto`, `manual` or `open` for push-to-talk), `strictness`, `threshold` and `whisper`.
+* `open_mic_setup(): Promise<Application | null>`: opens Mic Setup
+* Hook `proximityMicCleanupChanged(status: object)` fires in this browser when the cleanup starts, stops or fails, with the same object as `get_mic_status()`
+
 ## Development
-* Tests: `node test/smoke.mjs`, `node test/peers.mjs`, `node test/ui.mjs`, `node test/propagation.mjs`, and `node test/audio.mjs`. They stub just enough of Foundry, and of the browser's Web Audio, to run in Node.
+* Tests: `node test/smoke.mjs`, `node test/peers.mjs`, `node test/ui.mjs`, `node test/propagation.mjs`, `node test/audio.mjs`, and `node test/input.mjs`. They stub just enough of Foundry, and of the browser's Web Audio, to run in Node. `test/input.mjs` also runs the real noise filter on synthetic noises.
+* Third-party code: the noise filter, `scripts/vendor/rnnoise/rnnoise.wasm`, is RNNoise (BSD licence) as built by `@shiguredo/rnnoise-wasm` (Apache 2.0). See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 * Release: `tools/release.sh <version> "<what changed>"` sets the version everywhere, runs the tests, commits, tags, and pushes. The tag starts `.github/workflows/release.yml`, which publishes `module.json` and `module.zip` as a GitHub release.

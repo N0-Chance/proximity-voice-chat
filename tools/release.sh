@@ -22,6 +22,10 @@ sed -i "s/^export const AUDIO_SCRIPT_VERSION = \"[^\"]*\";/export const AUDIO_SC
 grep -q "^export const AUDIO_SCRIPT_VERSION = \"$version\";" scripts/voice-audio.js || { echo "failed to set AUDIO_SCRIPT_VERSION" >&2; exit 1; }
 sed -i "s/^export const PROPAGATION_SCRIPT_VERSION = \"[^\"]*\";/export const PROPAGATION_SCRIPT_VERSION = \"$version\";/" scripts/voice-propagation.js
 grep -q "^export const PROPAGATION_SCRIPT_VERSION = \"$version\";" scripts/voice-propagation.js || { echo "failed to set PROPAGATION_SCRIPT_VERSION" >&2; exit 1; }
+sed -i "s/^export const INPUT_SCRIPT_VERSION = \"[^\"]*\";/export const INPUT_SCRIPT_VERSION = \"$version\";/" scripts/voice-input.js
+grep -q "^export const INPUT_SCRIPT_VERSION = \"$version\";" scripts/voice-input.js || { echo "failed to set INPUT_SCRIPT_VERSION" >&2; exit 1; }
+sed -i "s/^export const WORKLET_SCRIPT_VERSION = \"[^\"]*\";/export const WORKLET_SCRIPT_VERSION = \"$version\";/" scripts/voice-input-worklet.js
+grep -q "^export const WORKLET_SCRIPT_VERSION = \"$version\";" scripts/voice-input-worklet.js || { echo "failed to set WORKLET_SCRIPT_VERSION" >&2; exit 1; }
 
 tmp=$(mktemp)
 jq --arg v "$version" --arg d "$repo/releases/download/v$version/module.zip" \
@@ -34,6 +38,7 @@ node test/peers.mjs | tail -1
 node test/ui.mjs | tail -1
 node test/propagation.mjs | tail -1
 node test/audio.mjs | tail -1
+node test/input.mjs | tail -1
 
 git add -A
 git commit -m "$version: $summary

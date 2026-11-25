@@ -28,7 +28,7 @@ jobs:
           esac
 
       - name: Build module.zip
-        run: zip -r module.zip module.json README.md scripts styles templates lang
+        run: zip -r module.zip module.json README.md THIRD-PARTY-NOTICES.md scripts styles templates lang
 
       # Foundry's manifest URL follows the "latest" release, so a delayed run for an older tag must not take it over
       - name: Create release

@@ -26,11 +26,21 @@ export class FakeAudioContext {
   static resumeMode = "ok";
   /** a function that says which streams createMediaStreamSource() should refuse */
   static refuseStream = null;
-  static reset() { this.instances = []; this.startState = "suspended"; this.resumeMode = "ok"; this.refuseStream = null; }
+  static reset() { this.instances = []; this.startState = "suspended"; this.resumeMode = "ok"; this.refuseStream = null; this.deviceRate = 48000; this.workletMode = "ok"; }
+
+  /** the sample rate a context gets when it asks for none, as a browser picks the output device's */
+  static deviceRate = 48000;
+  /** "ok" or "reject": whether audioWorklet.addModule() loads the module */
+  static workletMode = "ok";
 
   constructor(options) {
-    this.options = options; this.state = FakeAudioContext.startState; this.sampleRate = 48000; this.currentTime = 0;
+    this.options = options; this.state = FakeAudioContext.startState; this.sampleRate = options?.sampleRate ?? FakeAudioContext.deviceRate; this.currentTime = 0;
     this.listeners = {}; this.sources = [];
+    // like a browser: a worklet's processors can be made only after its module has loaded
+    this.audioWorklet = { modules: [], addModule: url => {
+      if (FakeAudioContext.workletMode === "reject") return Promise.reject(new Error("AbortError: Unable to load a worklet's module."));
+      return Promise.resolve().then(() => { this.audioWorklet.modules.push(url); });
+    } };
     FakeAudioContext.instances.push(this);
   }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
@@ -52,7 +62,45 @@ export class FakeAudioContext {
   createBiquadFilter() { const node = new FakeNode(this, "filter", { frequency: 350, Q: 1 }); node.type = "lowpass"; return node; }
   createStereoPanner() { return new FakeNode(this, "panner", { pan: 0 }); }
   createDynamicsCompressor() { return new FakeNode(this, "limiter", { threshold: -24, knee: 30, ratio: 12, attack: 0.003, release: 0.25 }); }
-  createMediaStreamDestination() { const node = new FakeNode(this, "destination"); node.stream = { id: "voice-output" }; return node; }
+  createMediaStreamDestination() { const node = new FakeNode(this, "destination"); node.stream = new FakeMediaStream([new FakeTrack("audio", "destination")]); node.stream.id = "voice-output"; return node; }
+}
+
+/** A media track: enabled is what's sent (Foundry mutes by switching it off), clones are independent, stop() ends it */
+export class FakeTrack {
+  static count = 0;
+  constructor(kind = "audio", label = "track") { this.kind = kind; this.label = label; this.id = "track" + (++FakeTrack.count); this.enabled = true; this.readyState = "live"; this.muted = false; }
+  clone() { const copy = new FakeTrack(this.kind, this.label + " (copy)"); copy.enabled = this.enabled; copy.readyState = this.readyState; copy.original = this.original ?? this; return copy; }
+  stop() { this.readyState = "ended"; }
+}
+
+export class FakeMediaStream {
+  static count = 0;
+  constructor(tracks = []) { this.id = "stream" + (++FakeMediaStream.count); this.tracks = [...tracks]; }
+  getTracks() { return [...this.tracks]; }
+  getAudioTracks() { return this.tracks.filter(t => t.kind === "audio"); }
+  getVideoTracks() { return this.tracks.filter(t => t.kind === "video"); }
+  addTrack(track) { if (!this.tracks.includes(track)) this.tracks.push(track); }
+  removeTrack(track) { this.tracks = this.tracks.filter(t => t !== track); }
+  clone() { return new FakeMediaStream(this.tracks.map(t => t.clone())); }
+}
+
+/**
+ * An AudioWorkletNode whose processor the test plays: messages the page posts are kept in port.sent, and
+ * emit() delivers a message from the processor, as the browser would, a moment later
+ */
+export class FakeWorkletNode extends FakeNode {
+  static instances = [];
+  constructor(context, name, options) {
+    super(context, "worklet");
+    // like a browser: the processor must have been registered by a loaded module
+    if (!context.audioWorklet.modules.length) throw new Error("InvalidStateError: AudioWorkletNode cannot be created: the node name '" + name + "' is not defined");
+    this.name = name; this.options = options;
+    this.port = { sent: [], onmessage: null, postMessage: message => this.port.sent.push(message) };
+    FakeWorkletNode.instances.push(this);
+  }
+  emit(data) { return Promise.resolve().then(() => this.port.onmessage?.({ data })); }
+  /** the settings the page last told the processor */
+  get settings() { return this.port.sent.filter(m => m.type === "settings").at(-1)?.settings ?? this.options.processorOptions.settings; }
 }
 
 /** An <audio> element as far as the module uses one */

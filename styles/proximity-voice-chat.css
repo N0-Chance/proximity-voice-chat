@@ -234,4 +234,87 @@
   .pvc-report-card .pvc-open-report {
     width: 100%;
   }
+
+  /* Mic Setup */
+  .pvc-mic-setup-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pvc-mic-setup-body .hint {
+    margin: 0 0 4px;
+    font-size: var(--font-size-12, 12px);
+    opacity: 0.8;
+  }
+
+  .pvc-mic-setup .pvc-mic-status {
+    margin: 0 0 4px;
+  }
+
+  .pvc-mic-setup .pvc-mic-failed { color: var(--color-level-warning, #e8c547); }
+
+  .pvc-mic-setup .pvc-mic-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .pvc-mic-setup .pvc-mic-row > span:first-child { min-width: 9em; }
+  .pvc-mic-setup .pvc-mic-row.pvc-mic-check > span:first-child { min-width: 0; }
+  .pvc-mic-setup .pvc-mic-row select,
+  .pvc-mic-setup .pvc-mic-row input[type="range"] { flex: 1; }
+  .pvc-mic-setup .pvc-mic-row output { min-width: 7em; text-align: right; }
+
+  .pvc-mic-setup .pvc-mic-meters {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 4px 8px;
+  }
+
+  .pvc-mic-setup .pvc-mic-meter {
+    position: relative;
+    height: 12px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.35);
+    overflow: hidden;
+  }
+
+  .pvc-mic-setup .pvc-mic-meter-level {
+    height: 100%;
+    width: 0;
+    background: #5fd35f;
+    transition: width 50ms linear;
+  }
+
+  .pvc-mic-setup .pvc-mic-speech .pvc-mic-meter-level { background: #8fb8ff; }
+
+  .pvc-mic-setup .pvc-mic-meter-marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #e8c547;
+  }
+
+  .pvc-mic-setup .pvc-mic-light {
+    grid-row: 1 / span 2;
+    grid-column: 3;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.35);
+    opacity: 0.5;
+  }
+
+  .pvc-mic-setup .pvc-mic-light.active {
+    background: #2e7d32;
+    color: #fff;
+    opacity: 1;
+  }
+
+  .pvc-mic-setup .pvc-mic-buttons {
+    display: flex;
+    justify-content: flex-end;
+  }
 }

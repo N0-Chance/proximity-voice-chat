@@ -5,6 +5,10 @@ import {
   AUDIO_PROBLEMS, AUDIO_SCRIPT_VERSION
 } from "./voice-audio.js";
 import {
+  register_voice_input_settings, set_voice_input_listener, attach_local_stream, detach_local_stream, input_gates_voice,
+  input_gate_open, voice_input_status, voice_input_report, open_mic_setup, INPUT_SCRIPT_VERSION
+} from "./voice-input.js";
+import {
   WALL_KINDS, DEFAULT_MUFFLE, wall_kind, build_graph, find_route, direct_sound, routed_sound, clarity, muffle_cutoff,
   muffle_gain, muffle_gain_legacy, pan_for, describe_hearing, PROPAGATION_SCRIPT_VERSION
 } from "./voice-propagation.js";
@@ -15,7 +19,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "2.1.2";
+const SCRIPT_VERSION = "2.2.0";
 
 /**
  * The different types with which a radius can be measured
@@ -394,10 +398,13 @@ Hooks.on("init", async () => {
     requiresReload: true
   });
   register_voice_audio_settings();
+  register_voice_input_settings();
   _register_propagation_settings();
   set_voice_audio_listener(_on_audio_path_change);
+  set_voice_input_listener(_on_voice_input_event);
   _patch_simplepeer();
   _patch_voice_detection();
+  _patch_local_stream();
   register_voice_ui_settings();
   register_diagnostics();
   // exposed api for macros
@@ -443,6 +450,8 @@ Hooks.on("init", async () => {
     get_user_voice_volume,
     set_user_voice_volume,
     get_audio_status,
+    get_mic_status: voice_input_status,
+    open_mic_setup,
     get_voice_range,
     get_speaking_token_uuids,
     collect_diagnostics,
@@ -1220,7 +1229,7 @@ Hooks.on("userConnected", (user, connected) => {
 
 /** Every script's own version; they all match the installed module unless a browser has an old one cached */
 function _script_versions() {
-  return [SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION, AUDIO_SCRIPT_VERSION, PROPAGATION_SCRIPT_VERSION];
+  return [SCRIPT_VERSION, UI_SCRIPT_VERSION, DIAG_SCRIPT_VERSION, AUDIO_SCRIPT_VERSION, PROPAGATION_SCRIPT_VERSION, INPUT_SCRIPT_VERSION];
 }
 
 Hooks.once("ready", () => {
@@ -1743,11 +1752,17 @@ function _is_peer_up(peer) {
 const _PATCHED = Symbol("proximity-voice-chat.patched");
 
 /**
- * Works around Foundry 14.369 leaving Voice Activation dead after a mute toggle. When only the mute setting
- * changes, SimplePeerAVClient.onSettingsChanged restarts voice detection with `changed.client.voice?.mode`, which is
- * undefined, so detection is stopped and never started again. In Voice Activation that detector is the only thing
- * that opens the microphone, so after unmuting nobody hears you until a reload. A missing mode now means the
- * current one. Foundry's own mute button, the voice bar, and the hotkey all go through this path.
+ * Foundry's voice detection, which opens the microphone in Voice Activation. Two changes:
+ *
+ * - Works around Foundry 14.369 leaving Voice Activation dead after a mute toggle. When only the mute setting
+ *   changes, SimplePeerAVClient.onSettingsChanged restarts voice detection with `changed.client.voice?.mode`, which
+ *   is undefined, so detection is stopped and never started again. In Voice Activation that detector is the only
+ *   thing that opens the microphone, so after unmuting nobody hears you until a reload. A missing mode now means the
+ *   current one. Foundry's own mute button, the voice bar, and the hotkey all go through this path.
+ * - While the microphone cleanup is being sent (voice-input.js), its voice gate decides when you're transmitting
+ *   instead. Foundry's detector waits for 150 ms of sound before opening, so first syllables are lost, and closes
+ *   with a hard cut half a second after the last loud moment, so word endings are too; and it reacts to the loudest
+ *   single pitch, so a bird counts as much as a voice. The gate decides ahead of what it sends and fades out.
  */
 function _patch_voice_detection() {
   const proto = foundry.av?.AVMaster?.prototype;
@@ -1758,10 +1773,54 @@ function _patch_voice_detection() {
   }
   if (original[_PATCHED]) return;
   const patched = function (mode) {
-    return original.call(this, mode ?? this.settings?.client?.voice?.mode);
+    mode ??= this.settings?.client?.voice?.mode;
+    if (mode === "activity" && input_gates_voice()) {
+      this.deactivateVoiceDetection?.();
+      this.broadcast?.(input_gate_open());
+      return;
+    }
+    return original.call(this, mode);
   };
   patched[_PATCHED] = true;
   proto._initializeUserVoiceDetection = patched;
+}
+
+/**
+ * Hands Foundry's microphone to the cleanup (voice-input.js) each time Foundry sets it up: at connection, and when
+ * the microphone device changes. Before Foundry replaces it, the cleanup of the old one is stopped.
+ */
+function _patch_local_stream() {
+  const proto = foundry.av?.clients?.SimplePeerAVClient?.prototype;
+  const original = proto?.initializeLocalStream;
+  if (typeof original !== "function") {
+    console.warn(MODULE_ID + " | SimplePeerAVClient microphone setup not found, microphone cleanup not available");
+    return;
+  }
+  if (original[_PATCHED]) return;
+  const patched = async function (...args) {
+    detach_local_stream();
+    const stream = await original.apply(this, args);
+    await attach_local_stream(this);
+    return stream;
+  };
+  patched[_PATCHED] = true;
+  proto.initializeLocalStream = patched;
+}
+
+/**
+ * The cleanup started or stopped being sent, or its gate opened or closed
+ * @param {{type: "state"} | {type: "gate", open: boolean}} event
+ */
+function _on_voice_input_event(event) {
+  const master = game.webrtc;
+  if (!master?.client || !game.user) return;
+  const mode = master.settings?.client?.voice?.mode;
+  if (event.type === "state") {
+    // Foundry's detector measures the stream that was just swapped, or is replaced by the gate
+    master._initializeUserVoiceDetection?.(mode);
+    return;
+  }
+  if (event.type === "gate" && mode === "activity" && input_gates_voice()) master.broadcast?.(event.open);
 }
 
 /**
@@ -2102,7 +2161,8 @@ async function _microphone_state() {
     deviceLabel: devices?.[device] ?? null,
     deviceFound: device === "default" || device === "disabled" || !devices ? null : Object.hasOwn(devices, device),
     activation: game.webrtc?.settings?.client?.voice?.mode ?? null,
-    transmitting: !!game.webrtc?.broadcasting
+    transmitting: !!game.webrtc?.broadcasting,
+    cleanup: await voice_input_report()
   };
 }
 

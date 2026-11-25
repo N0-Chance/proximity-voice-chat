@@ -17,7 +17,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "2.1.2";
+export const DIAG_SCRIPT_VERSION = "2.2.0";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -84,6 +84,9 @@ export function self_issues(self) {
   } else if (mic?.activation === "ptt" && !mic.transmitting) {
     issues.push({ level: "info", text: L("Mic.PushToTalk") });
   }
+  const cleanup = mic?.cleanup;
+  if (cleanup?.state === "failed") issues.push({ level: "warn", text: L("Cleanup.Failed") + " " + cleanup_reason_text(cleanup) });
+  else if (cleanup?.state === "waiting") issues.push({ level: "info", text: L("Cleanup.Waiting") });
   if (self.connectionFix === false) issues.push({ level: "warn", text: L("FixOff") });
   // reports from before 2.0 have no audio section
   const audio = self.audio;
@@ -115,6 +118,34 @@ function reason_suffix(error) {
 function audio_reason_text(audio) {
   if (!audio?.reason) return "";
   return game.i18n.localize("proximity-voice-chat.Audio.Reason." + audio.reason) + (audio.detail ? " [" + audio.detail + "]" : "");
+}
+
+/**
+ * Why the microphone cleanup isn't working, in words, with the browser's own error if there was one
+ * @param {{reason: string | null, detail?: string | null}} cleanup
+ * @returns {string}
+ */
+function cleanup_reason_text(cleanup) {
+  if (!cleanup?.reason) return "";
+  return game.i18n.localize("proximity-voice-chat.MicSetup.Reason." + cleanup.reason) + (cleanup.detail ? " [" + cleanup.detail + "]" : "");
+}
+
+/**
+ * The microphone cleanup as a short phrase, e.g. "on: noise filter, automatic (strictness 3), sending 23% of the time"
+ * @param {object | undefined} cleanup the report's self.mic.cleanup (reports from before 2.2 have none)
+ * @returns {string}
+ */
+export function cleanup_text(cleanup) {
+  if (!cleanup) return L("Audio.Unknown");
+  if (cleanup.state === "failed") return L("Cleanup.State.failed") + ": " + cleanup_reason_text(cleanup);
+  if (cleanup.state !== "active") return L("Cleanup.State." + cleanup.state);
+  const parts = [L(cleanup.filter === false ? "Cleanup.NoFilter" : cleanup.filterWanted ? "Cleanup.Filter" : "Cleanup.FilterOff")];
+  if (cleanup.gate === "open") parts.push(L("Cleanup.PushToTalk"));
+  else if (cleanup.gate === "manual") parts.push(F("Cleanup.Manual", { threshold: cleanup.threshold }));
+  else parts.push(F("Cleanup.Auto", { strictness: cleanup.strictness }));
+  if (cleanup.whisper) parts.push(L("Cleanup.Whisper"));
+  if (typeof cleanup.openShare === "number" && cleanup.gate !== "open") parts.push(F("Cleanup.OpenShare", { percent: Math.round(cleanup.openShare * 100) }));
+  return L("Cleanup.State.active") + ": " + parts.join(", ");
 }
 
 /**
@@ -227,6 +258,7 @@ export function report_text(report) {
     "Relay test: " + (self.relay ? relay_test_text(self.relayTest) : "no relay configured"),
     "Microphone: " + (self.mic ? (self.mic.capturing ? "capturing" : "NOT capturing") + ", permission " + self.mic.permission
       + ", device " + (self.mic.deviceLabel ?? self.mic.device ?? "?") + ", " + (self.mic.activation ?? "?") : "unknown"),
+    "Microphone cleanup: " + cleanup_text(self.mic?.cleanup),
     "Fix Voice Connection Drops: " + (self.connectionFix === undefined ? "unknown" : self.connectionFix ? "on" : "OFF"),
     "Voice audio: " + audio_path_text(self.audio) + "; sound through and around walls: "
       + (self.soundPropagation === undefined ? "unknown" : self.soundPropagation ? "on" : "off")
@@ -315,6 +347,7 @@ export function render_report(report, { unhide = null } = {}) {
   fact("Speaking", self.speakingThrough.join(", ") || L("Nothing"));
   fact("Relay", self.relay ?? L("NoRelay"));
   if (self.relay) fact("RelayTest", relay_test_text(self.relayTest));
+  if (self.mic?.cleanup) fact("Cleanup", cleanup_text(self.mic.cleanup));
   if (self.audio) {
     fact("Audio", audio_path_text(self.audio));
     fact("Propagation", L(self.soundPropagation ? "On" : "Off"));

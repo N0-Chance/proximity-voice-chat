@@ -21,7 +21,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const AUDIO_SCRIPT_VERSION = "2.1.2";
+export const AUDIO_SCRIPT_VERSION = "2.2.0";
 
 /** How quickly changes are eased in, as time constants in seconds, so moving tokens don't make zipper noise */
 const RAMP = { gain: 0.05, cutoff: 0.08, pan: 0.08 };
