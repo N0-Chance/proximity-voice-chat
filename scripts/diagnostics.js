@@ -17,7 +17,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const DIAG_SCRIPT_VERSION = "2.2.0";
+export const DIAG_SCRIPT_VERSION = "2.2.1";
 
 const SOCKET = "module." + MODULE_ID;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -144,6 +144,7 @@ export function cleanup_text(cleanup) {
   else if (cleanup.gate === "manual") parts.push(F("Cleanup.Manual", { threshold: cleanup.threshold }));
   else parts.push(F("Cleanup.Auto", { strictness: cleanup.strictness }));
   if (cleanup.whisper) parts.push(L("Cleanup.Whisper"));
+  if (typeof cleanup.delay === "number" && cleanup.gate !== "open") parts.push(F("Cleanup.Delay", { delay: cleanup.delay }));
   if (typeof cleanup.openShare === "number" && cleanup.gate !== "open") parts.push(F("Cleanup.OpenShare", { percent: Math.round(cleanup.openShare * 100) }));
   return L("Cleanup.State.active") + ": " + parts.join(", ");
 }

@@ -10,10 +10,14 @@
  *   10 ms of sound from 0 to 1 for "is this a voice?". Breathing, birds, clicks and typing score near 0, so the gate
  *   can tell them apart from speech even when they're as loud as it.
  * - RNNoise's output runs two frames (20 ms) behind its input, while its score is already up to date, and the gate
- *   holds back two more frames. So the gate has decided to open about 30 ms before the first syllable comes out,
- *   instead of clipping it the way Foundry's Voice Activation does.
- * - The gate adapts to the room on its own: it follows the background level while nobody speaks, and your own
- *   speaking level while you do, so a voice from the next room (or a TV) is too quiet to open it.
+ *   holds back more frames still: the look-ahead, which the GM sets (Microphone Cleanup Delay). So by the time a
+ *   word's vowel convinces RNNoise it's speech, the gate can still let out the quiet consonant before it ("h", "s",
+ *   "f"), instead of clipping it the way Foundry's Voice Activation does.
+ * - The gate adapts to the room on its own: it follows the background level while nobody speaks, and your typical
+ *   speaking level while you do, so a voice from the next room (or a TV) is too quiet to open it. A shout or a
+ *   laugh barely moves that level, so it doesn't make the gate stricter for what you say next.
+ * - A sound about as loud as you usually speak, or louder, needs much less certainty that it's a voice: short excited
+ *   words ("Boo!", "Ha!") are over before RNNoise gets sure, while noises score lower still.
  * - It stays open through short pauses (hold), and fades out instead of cutting off, so word endings survive.
  * - Whispers have none of a voice's buzz, so RNNoise scores them low and filters them away. While you're in
  *   Whisper mode the gate asks for much less, and some of the unfiltered sound is mixed back in.
@@ -23,7 +27,7 @@
  */
 
 /** Kept in step with module.json by tools/release.sh, and reported to Voice Diagnostics by the worklet */
-export const WORKLET_SCRIPT_VERSION = "2.2.0";
+export const WORKLET_SCRIPT_VERSION = "2.2.1";
 
 /** RNNoise works at 48 kHz on 10 ms frames */
 export const SAMPLE_RATE = 48000;
@@ -32,8 +36,29 @@ export const FRAME = 480;
 /** RNNoise's output lags its input by this many frames; unfiltered sound is delayed to match */
 export const DENOISE_DELAY_FRAMES = 2;
 
-/** How many frames the gate decides ahead of what it lets out */
-export const LOOKAHEAD_FRAMES = 2;
+/** How many frames the gate decides ahead of what it lets out, by default and at most */
+export const LOOKAHEAD_FRAMES = 7;
+export const MAX_LOOKAHEAD_FRAMES = 12;
+
+/**
+ * The delay the cleanup adds in total, in ms, for a number of look-ahead frames: 10 ms of framing, 20 ms inside
+ * RNNoise, and the look-ahead
+ */
+export const delay_ms = lookahead => 30 + 10 * lookahead;
+
+/** Look-ahead frames for a total delay the GM chose */
+export function lookahead_frames(total_ms) {
+  const ms = Number(total_ms);
+  if (!Number.isFinite(ms)) return LOOKAHEAD_FRAMES;
+  return Math.min(MAX_LOOKAHEAD_FRAMES, Math.max(0, Math.round((ms - 30) / 10)));
+}
+
+/**
+ * How sure RNNoise must be, on 3 frames in a row, for a sound at least as loud as your typical speech. Noises reach
+ * this on single frames at most (measured: breathing, birds, clicks and typing peak at 0.3 to 0.4 for one frame,
+ * and stay under 0.2 on 99% of frames).
+ */
+const P_LOUD = 0.35;
 
 /** Fade-in and fade-out, in samples */
 const ATTACK_SAMPLES = 5 * SAMPLE_RATE / 1000;
@@ -49,7 +74,7 @@ const METER_EVERY = 5;
  * Strictness 1 (relaxed) to 5 (strict), for the automatic gate:
  * - open: how sure RNNoise must be that it's speech before the gate opens
  * - margin: how far above the room's background level, in dB
- * - range: how far below your speaking level (the loud parts of your speech) a voice may be and still count, in dB
+ * - range: how far below your speaking level (the louder parts of your speech) a voice may be and still count, in dB
  */
 export const STRICTNESS = {
   open: [0.3, 0.45, 0.6, 0.75, 0.9],
@@ -65,6 +90,7 @@ export const STRICTNESS = {
  * @param {number} [settings.threshold] dB, for the manual gate
  * @param {boolean} [settings.whisper] the player is in Whisper mode
  * @param {boolean} [settings.filter] remove noise from what's sent (RNNoise still scores speech when this is off)
+ * @param {number} [settings.delay] the total delay the GM chose, in ms, which sets the look-ahead
  * @param {boolean} [denoiser] whether RNNoise loaded; without it the gate goes by level alone
  */
 export function gate_params(settings = {}, denoiser = true) {
@@ -76,6 +102,9 @@ export function gate_params(settings = {}, denoiser = true) {
     denoiser,
     p_open: STRICTNESS.open[index],
     p_close: STRICTNESS.open[index] * 0.4,
+    p_loud: P_LOUD,
+    // push-to-talk sends what the key says, so holding sound back would only clip the end when the key comes up
+    lookahead: gate === "open" ? 0 : lookahead_frames(settings.delay ?? delay_ms(LOOKAHEAD_FRAMES)),
     margin: STRICTNESS.margin[index],
     range: STRICTNESS.range[index],
     // frames the gate stays open after the last sign of speech, so pauses between words don't chop
@@ -94,6 +123,7 @@ export function gate_params(settings = {}, denoiser = true) {
   if (settings.whisper) {
     params.p_open *= 0.3;
     params.p_close *= 0.3;
+    params.p_loud *= 0.5;
     params.margin = Math.max(2, params.margin - 3);
     params.range += 10;
     params.hold = 60;
@@ -111,9 +141,13 @@ export class VoiceGate {
     this.params = params;
     /** the room's background level, dB */
     this.floor = -70;
-    /** your speaking level: the loud parts of your speech, dB */
+    /** your speaking level: the louder parts of your speech, dB */
     this.speech = -30;
     this.recent = [];
+    /** how many frames in a row have been loud and fairly sure to be a voice */
+    this.loud_run = 0;
+    /** frames of clear speech the speaking level has learned from: until it has heard you, it's only a guess */
+    this.learned = 0;
     this.hold = 0;
     this.open = params.gate === "open";
   }
@@ -147,7 +181,12 @@ export class VoiceGate {
       continues = out_db >= this.floor + p.margin / 2;
     } else {
       // the newest frame's own level: the filtered level lags two frames behind the score
-      starts = vad >= p.p_open && raw_db >= this.needed;
+      // a sound as loud as you usually speak needs less certainty, on three frames in a row: short excited words
+      // are over before RNNoise gets sure
+      // only once it has heard you speak for a second: until then "as loud as you usually speak" is a guess
+      const loud = this.learned >= 100 && raw_db >= Math.max(this.speech - 3, this.needed);
+      this.loud_run = vad >= p.p_loud && loud ? this.loud_run + 1 : 0;
+      starts = (vad >= p.p_open && raw_db >= this.needed) || this.loud_run >= 3;
       continues = vad >= p.p_close && raw_db >= Math.max(this.floor + p.margin / 2, this.speech - p.range - 6);
     }
     this.recent.push(starts);
@@ -167,14 +206,20 @@ export class VoiceGate {
       else this.floor += Math.min(raw_db - this.floor, 0.01);
       this.floor = Math.min(-20, Math.max(-90, this.floor));
     }
-    // your speaking level follows the loud parts of clear speech: it rises within a fraction of a second and
-    // sinks over half a minute, so quieter words and a voice from across the room don't drag it down
-    if (this.open && this.params.gate !== "open" && (vad === null || vad >= 0.9) && out_db > this.floor + 10) {
-      this.speech += (out_db - this.speech) * (out_db > this.speech ? 0.05 : 0.0003);
+    // your speaking level follows the louder parts of clear speech: it rises over about a second and sinks over
+    // about twenty, and each frame counts at most 6 dB either side of it. So a shout or a laugh lifts it by under
+    // 2 dB, and someone else talking quietly in the room for ten seconds lowers it by about 2.
+    if (this.open && this.params.gate !== "open" && (vad === null || vad >= 0.9) && raw_db > this.floor + 10) {
+      const level = Math.min(this.speech + 6, Math.max(this.speech - 6, raw_db));
+      this.speech += (level - this.speech) * (level > this.speech ? 0.01 : 0.0005);
+      this.learned++;
       this.speech = Math.min(-6, Math.max(-60, this.speech));
     }
   }
 }
+
+/** A frame of silence, as it waits in the look-ahead */
+const silent_frame = () => ({ mixed: new Float32Array(FRAME), dry: new Float32Array(FRAME), vad: 0 });
 
 /** RMS level of some samples, in dB (full scale is 0) */
 export function level_db(samples) {
@@ -258,8 +303,12 @@ export class InputEngine {
     this.filled = 0;
     // unfiltered frames waiting to line up with RNNoise's output
     this.dry_queue = Array.from({ length: denoiser ? DENOISE_DELAY_FRAMES : 0 }, () => new Float32Array(FRAME));
-    // frames already decided on, waiting to go out
-    this.lookahead = Array.from({ length: LOOKAHEAD_FRAMES }, () => new Float32Array(FRAME));
+    // frames already decided on, waiting to go out: filtered and unfiltered, with RNNoise's score for each
+    this.lookahead = Array.from({ length: this.gate.params.lookahead }, () => silent_frame());
+    // RNNoise's latest scores, to line each one up with the frame it's for as that comes out of RNNoise
+    this.vad_history = [];
+    // frames left to send unfiltered at the start of an opening, until RNNoise is sure it's speech
+    this.preroll = 0;
     this.fifo = new Float32Array(FRAME * 8);
     this.read = 0;
     this.write = OUTPUT_PREFILL;
@@ -332,7 +381,15 @@ export class InputEngine {
     if (open) this.open_frames++;
     this.last = { raw: raw_db, out: out_db, vad };
     if (open !== was_open && this.gate.params.gate !== "open") this.events.push({ type: "decision", open });
-    this.lookahead.push(mixed);
+    // the frame coming out of RNNoise now went in two frames ago, and so did its score
+    let frame_vad = null;
+    if (this.denoiser) {
+      this.vad_history.push(vad);
+      if (this.vad_history.length > DENOISE_DELAY_FRAMES + 1) this.vad_history.shift();
+      frame_vad = this.vad_history.length > DENOISE_DELAY_FRAMES ? this.vad_history[0] : 0;
+    }
+    this.lookahead.push({ mixed, dry, vad: frame_vad });
+    this._resize_lookahead();
     this._emit(this.lookahead.shift(), open);
     if (this.metering && this.frames % METER_EVERY === 0) {
       this.events.push({
@@ -342,15 +399,52 @@ export class InputEngine {
     }
   }
 
+  /**
+   * Follows a change of look-ahead (the GM's delay slider), while nothing is being sent so it can't be heard: a
+   * longer one starts with silence, a shorter one drops what was waiting, and either way the gate was closed
+   */
+  _resize_lookahead() {
+    const wanted = this.gate.params.lookahead + 1;// the frame about to go out, and the ones behind it
+    if (this.lookahead.length === wanted) return;
+    if (this.gain > 0 && this.gate.params.gate !== "open") return;
+    while (this.lookahead.length < wanted) this.lookahead.unshift(silent_frame());
+    while (this.lookahead.length > wanted) this.lookahead.shift();
+  }
+
+  /**
+   * Picks what to send of a frame. RNNoise filters away the start of a word that doesn't sound like a voice yet, such
+   * as the breath of an "h" or the hiss of an "s", so an opening starts unfiltered: the look-ahead's worth of frames
+   * before RNNoise is sure, then a 10 ms crossfade to the filtered sound. Never longer than that, so a false start
+   * doesn't send unfiltered noise for long.
+   */
+  _choose(entry, open) {
+    const p = this.gate.params;
+    if (entry.vad === null || p.dry >= 1 || p.gate === "open") return entry.mixed;
+    if (this.gain === 0 && open) this.preroll = p.lookahead + DENOISE_DELAY_FRAMES;
+    if (this.preroll <= 0) return entry.mixed;
+    if (entry.vad >= 0.5 || this.preroll === 1) {
+      this.preroll = 0;
+      const blended = new Float32Array(FRAME);
+      for (let i = 0; i < FRAME; i++) { const t = i / FRAME; blended[i] = entry.dry[i] * (1 - t) + entry.mixed[i] * t; }
+      return blended;
+    }
+    this.preroll--;
+    return entry.dry;
+  }
+
   /** Writes a frame out through the fade, and reports when what's sent starts and stops */
-  _emit(frame, open) {
+  _emit(entry, open) {
+    const frame = this._choose(entry, open);
     const size = this.fifo.length;
     for (let i = 0; i < FRAME; i++) {
       const before = this.gain;
       if (open) this.gain = Math.min(1, this.gain + 1 / ATTACK_SAMPLES);
       else this.gain = Math.max(0, this.gain - 1 / RELEASE_SAMPLES);
       if (before === 0 && this.gain > 0) this.events.push({ type: "gate", open: true });
-      if (before > 0 && this.gain === 0) this.events.push({ type: "gate", open: false });
+      if (before > 0 && this.gain === 0) {
+        this.events.push({ type: "gate", open: false });
+        this.preroll = 0;
+      }
       this.fifo[this.write] = frame[i] * this.gain;
       this.write = (this.write + 1) % size;
       // never expected: drop the oldest sample rather than overrun

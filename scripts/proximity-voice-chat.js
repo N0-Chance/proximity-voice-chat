@@ -6,7 +6,7 @@ import {
 } from "./voice-audio.js";
 import {
   register_voice_input_settings, set_voice_input_listener, attach_local_stream, detach_local_stream, input_gates_voice,
-  input_gate_open, voice_input_status, voice_input_report, open_mic_setup, INPUT_SCRIPT_VERSION
+  input_gate_open, input_active, voice_input_status, voice_input_report, open_mic_setup, INPUT_SCRIPT_VERSION
 } from "./voice-input.js";
 import {
   WALL_KINDS, DEFAULT_MUFFLE, wall_kind, build_graph, find_route, direct_sound, routed_sound, clarity, muffle_cutoff,
@@ -19,7 +19,7 @@ export const MODULE_ID = "proximity-voice-chat";
  * The version this script was released as, kept in step with module.json by tools/release.sh.
  * Compared against the installed module's version to catch browsers running a stale cached copy.
  */
-const SCRIPT_VERSION = "2.2.0";
+const SCRIPT_VERSION = "2.2.1";
 
 /**
  * The different types with which a radius can be measured
@@ -451,6 +451,7 @@ Hooks.on("init", async () => {
     set_user_voice_volume,
     get_audio_status,
     get_mic_status: voice_input_status,
+    has_mic_cleanup,
     open_mic_setup,
     get_voice_range,
     get_speaking_token_uuids,
@@ -1220,7 +1221,8 @@ Hooks.on("updateUser", (_document, changed, _options, _userId) => {
 });
 
 Hooks.on("userConnected", (user, connected) => {
-  // a user who leaves comes back on Normal
+  // a user who leaves comes back on Normal, and says again whether their microphone is cleaned up
+  if (!connected) _cleaned_mics.delete(user.id);
   if (!connected && _voice_modes.delete(user.id) && globalThis.canvas?.ready) _rebuild_all_sources();
   // a GM joining or leaving changes who speaks through the tokens they have selected
   if (user.isGM && globalThis.canvas?.ready) _rebuild_all_sources();
@@ -1722,7 +1724,11 @@ Hooks.once("ready", () => {
     if (message?.action === "voice-mode-request" && get_voice_mode(game.user) !== VOICE_MODES.NORMAL) {
       game.socket.emit(_SOCKET, { action: "voice-mode", from: game.user.id, mode: get_voice_mode(game.user) });
     }
+    if (message?.action === "mic-cleanup") _on_mic_cleanup(message);
+    // someone who just loaded asks whose microphone goes through the cleanup; only those need to answer
+    if (message?.action === "mic-cleanup-request" && input_active()) _announce_mic_cleanup(true);
   });
+  game.socket.emit(_SOCKET, { action: "mic-cleanup-request", from: game.userId });
   game.socket.emit(_SOCKET, { action: "voice-mode-request", from: game.userId });
   if (game.user?.isGM) game.socket.emit(_SOCKET, { action: "voice-self-test-request", from: game.userId });
   _run_self_test();
@@ -1786,6 +1792,38 @@ function _patch_voice_detection() {
 }
 
 /**
+ * Who sends their microphone through the cleanup, by user ID, as their browsers have said. Their voice gate sends
+ * true silence between words, so their speaking cue can follow what's actually sent rather than a loudness
+ * threshold (voice-ui.js). Only cues depend on this, so a false claim over the socket does no harm.
+ */
+const _cleaned_mics = new Set();
+/** What this browser last told everyone */
+let _announced_cleanup = false;
+
+/**
+ * @param {string} user_id
+ * @returns {boolean} whether that user's microphone goes through the cleanup's voice gate
+ */
+export function has_mic_cleanup(user_id) {
+  if (user_id === game.user?.id) return input_active();
+  return _cleaned_mics.has(user_id);
+}
+
+/** Tells everyone whether this browser's microphone goes through the cleanup, when that changes */
+function _announce_mic_cleanup(force = false) {
+  const active = input_active();
+  if (!force && active === _announced_cleanup) return;
+  _announced_cleanup = active;
+  game.socket?.emit(_SOCKET, { action: "mic-cleanup", from: game.user.id, active });
+}
+
+function _on_mic_cleanup(message) {
+  if (typeof message.from !== "string") return;
+  if (message.active) _cleaned_mics.add(message.from);
+  else _cleaned_mics.delete(message.from);
+}
+
+/**
  * Hands Foundry's microphone to the cleanup (voice-input.js) each time Foundry sets it up: at connection, and when
  * the microphone device changes. Before Foundry replaces it, the cleanup of the old one is stopped.
  */
@@ -1818,6 +1856,7 @@ function _on_voice_input_event(event) {
   if (event.type === "state") {
     // Foundry's detector measures the stream that was just swapped, or is replaced by the gate
     master._initializeUserVoiceDetection?.(mode);
+    _announce_mic_cleanup();
     return;
   }
   if (event.type === "gate" && mode === "activity" && input_gates_voice()) master.broadcast?.(event.open);

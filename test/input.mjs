@@ -48,6 +48,25 @@ if (W) {
     check("after the last word it holds about 300 ms, then closes", closed_at >= 28 && closed_at <= 31, String(closed_at));
   }
   {
+    // short excited words ("Boo!", "Ha!"): over before RNNoise is sure. Loud ones open the gate anyway
+    const gate = new W.VoiceGate(W.gate_params({}));
+    settle(gate);
+    run_gate(gate, repeat(300, SPEECH));
+    run_gate(gate, repeat(200, ROOM));
+    const unsure = vad => repeat(15, [-22, -22, vad]);
+    check("a loud short word RNNoise is only fairly sure of (0.4) opens the gate", run_gate(gate, unsure(0.4)).some(Boolean));
+    run_gate(gate, repeat(200, ROOM));
+    check("...a quiet one it's that unsure of doesn't", !run_gate(gate, repeat(15, [-42, -42, 0.4])).some(Boolean));
+    run_gate(gate, repeat(200, ROOM));
+    check("...nor a loud noise that looks like speech for one frame at a time", !run_gate(gate, Array.from({ length: 60 }, (_, i) => [-20, -60, i % 2 ? 0.4 : 0.05])).some(Boolean));
+    run_gate(gate, repeat(200, ROOM));
+    const before = gate.speech;
+    run_gate(gate, repeat(30, [-6, -6, 0.97]));
+    check("a 300 ms shout barely raises the speaking level", gate.speech - before < 2, (gate.speech - before).toFixed(2) + " dB");
+    run_gate(gate, repeat(60, ROOM));
+    check("...so the next normal sentence still opens the gate", run_gate(gate, repeat(5, SPEECH)).at(-1));
+  }
+  {
     // the room gets louder (a fan goes on): what counts as background follows, about 1 dB a second
     const gate = new W.VoiceGate(W.gate_params({}));
     settle(gate);
@@ -99,36 +118,69 @@ if (W) {
     const queue = [new Float32Array(FRAME), new Float32Array(FRAME)];
     return { process(frame) { const vad = is_speech(frame) ? 0.97 : 0.01; queue.push(frame.slice()); frame.set(queue.shift()); return vad; } };
   };
-  {
-    const rate = 48000;
-    const tone = (n, amp) => Float32Array.from({ length: n }, (_, i) => amp * Math.sin(2 * Math.PI * 220 * i / rate));
+  const rate = 48000;
+  const tone = (n, amp, hz = 220) => Float32Array.from({ length: n }, (_, i) => amp * Math.sin(2 * Math.PI * hz * i / rate));
+  const quiet = n => Float32Array.from({ length: n }, (_, i) => 0.0005 * Math.sin(i * 1.7));
+  const join = parts => { const a = new Float32Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { a.set(p, o); o += p.length; } return a; };
+  const run_engine = (engine, input) => { const out = new Float32Array(input.length), block = new Float32Array(128); for (let i = 0; i + 128 <= input.length; i += 128) { engine.process(input.subarray(i, i + 128), block); out.set(block, i); } return out; };
+  for (const delay_ms of [50, 100]) {
     // 4 s of quiet, 1 s of "speech" (a loud tone), then 1 s of a quieter sound that isn't speech (a cough, a chair);
     // speech starts mid-frame
-    const quiet = n => Float32Array.from({ length: n }, (_, i) => 0.0005 * Math.sin(i * 1.7));
-    const parts = [quiet(rate * 4 + 200), tone(rate, 0.1), tone(rate, 0.03)];
-    const input = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
-    let o = 0; for (const p of parts) { input.set(p, o); o += p.length; }
+    const input = join([quiet(rate * 4 + 200), tone(rate, 0.1), tone(rate, 0.03)]);
     const onset = rate * 4 + 200, offset = onset + rate;
-    const engine = new W.InputEngine(fake_denoiser(frame => W.level_db(frame) > -28), { gate: "auto" });
-    const out = new Float32Array(input.length);
-    const block = new Float32Array(128);
-    for (let i = 0; i + 128 <= input.length; i += 128) { engine.process(input.subarray(i, i + 128), block); out.set(block, i); }
-    const delay = 2400;// 10 ms of framing, 20 ms inside RNNoise, 20 ms of look-ahead
+    const engine = new W.InputEngine(fake_denoiser(frame => W.level_db(frame) > -28), { gate: "auto", delay: delay_ms });
+    const out = run_engine(engine, input);
+    const delay = delay_ms * 48;// 10 ms of framing, 20 ms inside RNNoise, and the rest is look-ahead
     const first = out.findIndex(v => Math.abs(v) > 1e-3);
-    check("what's sent is 50 ms behind the microphone", first >= onset + delay - 5 && first <= onset + delay + 5, (first - onset) + " samples");
+    check("with the GM's delay at " + delay_ms + " ms, what's sent is " + delay_ms + " ms behind the microphone", first <= onset + delay + 5 && first >= onset + delay - 5, (first - onset) / 48 + " ms");
     const start = out.subarray(onset + delay, onset + delay + 480);
     const ratio = Math.max(...start.map(Math.abs)) / 0.1;
-    check("the first syllable comes out whole: the gate was already open when it got there", ratio > 0.99, ratio.toFixed(3));
-    // how much of the sound after the last word gets out, measured on the sound as it was before the gate
+    check("...the first syllable comes out whole: the gate was already open when it got there", ratio > 0.99, ratio.toFixed(3));
+    // how much of the sound after the last word gets out, measured on the sound as it was before the gate. The gate
+    // holds 300 ms after the last speech it heard, which is the look-ahead ahead of what's going out
+    const hold_end = 310 - delay_ms;
     const after = ms => Math.max(...out.subarray(offset + delay + ms * 48, offset + delay + ms * 48 + 480).map(Math.abs)) / 0.03;
-    check("after the last word it holds about 250 ms, then fades out over about 120 ms instead of cutting off",
-      after(0) > 0.99 && after(200) > 0.99 && after(320) > 0.2 && after(320) < 0.8 && after(400) === 0,
-      [0, 200, 320, 400].map(ms => after(ms).toFixed(2)).join(" "));
-    check("the quiet before speech is silenced", out.subarray(rate, onset).every(v => v === 0));
+    check("...after the last word it holds, then fades out over about 120 ms instead of cutting off",
+      after(0) > 0.99 && after(hold_end - 50) > 0.99 && after(hold_end + 60) > 0.2 && after(hold_end + 60) < 0.8 && after(hold_end + 150) === 0,
+      [0, hold_end - 50, hold_end + 60, hold_end + 150].map(ms => ms + "ms " + after(ms).toFixed(2)).join(", "));
+    check("...the quiet before speech is silenced", out.subarray(rate, onset - 48 * delay_ms).every(v => v === 0));
     const decisions = engine.events.filter(e => e.type === "decision");
     const gates = engine.events.filter(e => e.type === "gate");
-    check("it reports deciding to open before the sound starts going out, and closing once it has faded",
+    check("...it reports deciding to open before the sound starts going out, and closing once it has faded",
       decisions[0]?.open === true && gates[0]?.open === true && gates.at(-1)?.open === false && engine.events.indexOf(decisions[0]) < engine.events.indexOf(gates[0]));
+  }
+  {
+    // a word that starts with a quiet consonant ("h", "s") RNNoise doesn't recognise as a voice, and filters away:
+    // the stand-in removes whatever it doesn't call speech
+    const filtering = () => {
+      const queue = [new Float32Array(FRAME), new Float32Array(FRAME)];
+      return { process(frame) { const speech = W.level_db(frame) > -28; const vad = speech ? 0.97 : 0.01; queue.push(speech ? frame.slice() : new Float32Array(FRAME)); frame.set(queue.shift()); return vad; } };
+    };
+    const consonant_ms = 60;
+    const input = join([quiet(rate * 3), tone(consonant_ms * 48, 0.008, 3000), tone(rate / 2, 0.1), quiet(rate)]);
+    const at = rate * 3;
+    const kept = delay_ms => {
+      const out = run_engine(new W.InputEngine(filtering(), { gate: "auto", delay: delay_ms }), input);
+      let ie = 0, oe = 0; for (let i = at; i < at + consonant_ms * 48; i++) { ie += input[i] ** 2; oe += out[i + delay_ms * 48] ** 2; }
+      return 10 * Math.log10(oe / ie + 1e-12);
+    };
+    const short = kept(50), long = kept(100);
+    check("a 60 ms first consonant the filter would remove comes out whole at 100 ms delay, sent unfiltered until the word is recognised", long > -1, long.toFixed(1) + " dB");
+    check("...and only partly at 50 ms", short < -3 && short > -40, short.toFixed(1) + " dB");
+    const noise_out = run_engine(new W.InputEngine(filtering(), { gate: "auto", delay: 100 }), join([quiet(rate * 3), tone(rate, 0.008, 3000), quiet(rate)]));
+    check("...but a sound that never turns into a word isn't sent at all", noise_out.every(v => v === 0));
+  }
+  {
+    // the GM moves the delay slider mid-session: it applies in the next pause, never mid-word
+    const engine = new W.InputEngine(fake_denoiser(frame => W.level_db(frame) > -28), { gate: "auto", delay: 50 });
+    run_engine(engine, join([quiet(rate * 3), tone(rate / 2, 0.1)]));
+    engine.configure({ gate: "auto", delay: 120 });
+    run_engine(engine, tone(rate / 10, 0.1));
+    check("a new delay waits while someone is speaking", engine.lookahead.length === 2);
+    run_engine(engine, quiet(rate));
+    check("...and applies once they've stopped", engine.lookahead.length === 9, String(engine.lookahead.length));
+    check("push-to-talk has no look-ahead, so letting go of the key doesn't cut off the last word", W.gate_params({ gate: "open", delay: 150 }).lookahead === 0);
+    check("the delay slider maps to look-ahead: 30 ms of it is framing and RNNoise", W.gate_params({ delay: 30 }).lookahead === 0 && W.gate_params({ delay: 100 }).lookahead === 7 && W.gate_params({ delay: 150 }).lookahead === 12);
   }
   {
     // the browser may use blocks other than 128 samples; nothing may be lost or run dry
@@ -136,8 +188,8 @@ if (W) {
     const input = Float32Array.from({ length: 48000 }, (_, i) => Math.sin(i / 10) * 0.2);
     const out = new Float32Array(input.length); let i = 0;
     for (const size of [128, 256, 100, 512, 128]) for (let k = 0; k < 30 && i + size <= input.length; k++) { const b = new Float32Array(size); engine.process(input.subarray(i, i + size), b); out.set(b, i); i += size; }
-    const lag = 480;// framing only: no RNNoise, no look-ahead hold needed when it's open
-    let worst = 0; for (let k = lag + 1000; k < i; k++) worst = Math.max(worst, Math.abs(out[k] - input[k - lag - 960]));
+    const lag = 480;// framing only: no RNNoise, and push-to-talk has no look-ahead
+    let worst = 0; for (let k = lag + 1000; k < i; k++) worst = Math.max(worst, Math.abs(out[k] - input[k - lag]));
     check("without RNNoise and gate open, sound passes unchanged whatever the block size", worst < 1e-6, worst.toExponential(2));
   }
 
@@ -327,11 +379,14 @@ globalThis.game = {
   settings: { register: (m, k, c) => { settings[k] ??= c.default; settingConfigs[k] = c; }, get: (m, k) => settings[k],
     set: async (m, k, v) => { settings[k] = v; settingConfigs[k]?.onChange?.(v); }, registerMenu() {} },
   i18n: { localize: s => s, format: (s, d) => s + " " + JSON.stringify(d) },
-  socket: { on() {}, emit() {} },
+  socket: { on: (n, fn) => socketHandlers.push(fn), emit: (n, data) => emitted.push(data) },
   keybindings: { register() {}, get: () => [] },
   users: Object.assign(users, { get: id => users.find(u => u.id === id) }),
   audio: { startLevelReports: (id, stream, cb) => { levelReports.set(id, { stream, cb }); return true; }, stopLevelReports: id => { levelReports.delete(id); } },
 };
+const socketHandlers = [], emitted = [];
+const receive = message => socketHandlers.forEach(fn => fn(message));
+const announced = () => emitted.filter(m => m.action === "mic-cleanup");
 globalThis.canvas = { ready: false, tokens: { controlled: [] } };
 globalThis.ui = { webrtc: { render() {}, setUserIsSpeaking() {}, getUserVideoElement: () => null }, notifications: { info() {}, warn() {}, error() {} } };
 globalThis.fromUuid = async () => null;
@@ -372,12 +427,16 @@ check("...and it's fed a copy of the microphone, so Foundry muting the sent trac
 check("...through a high-pass filter", FakeAudioContext.instances.at(-1).sources.at(-1)?.outputs[0]?.type === "highpass");
 check("Foundry's level readings measure what's sent", client.levelsStream.getAudioTracks()[0]?.original === sentTrack());
 check("status says it's active", status().state === "active", JSON.stringify(status()));
+check("...and everyone is told, so their speaking cue for you follows your gate", announced().length === 1 && announced()[0].active === true && announced()[0].from === "p1");
+check("...including you", api.has_mic_cleanup("p1") === true);
+receive({ action: "mic-cleanup-request", from: "p2" });
+check("someone who loads later is told too", announced().length === 2 && announced()[1].active === true);
 /** A connection Foundry makes from its outgoing stream as it is at that moment */
 const newPeer = id => { const peer = new FakePeer(client.localStream); client.peers.set(id, peer); return peer; };
 const firstPeer = newPeer("p2");
 check("a connection made now sends the cleaned-up track", firstPeer.sending()[0] === sentTrack());
 check("Always Enabled: the sent track stays on; the gate shapes the sound", sentTrack().enabled === true && master.broadcasting === true);
-check("the worklet was told: automatic, Balanced, filter on, not whispering", JSON.stringify(worklet().settings) === JSON.stringify({ gate: "auto", strictness: 3, threshold: -45, whisper: false, filter: true }), JSON.stringify(worklet().settings));
+check("the worklet was told: automatic, Balanced, filter on, not whispering", JSON.stringify(worklet().settings) === JSON.stringify({ gate: "auto", strictness: 3, threshold: -45, whisper: false, filter: true, delay: 100 }), JSON.stringify(worklet().settings));
 
 // --- muting still works on the track Foundry sends
 await rtc.set("client", "users.p1.muted", true);
@@ -421,7 +480,7 @@ check("Whisper mode tells the gate to ask for less", worklet().settings.whisper 
 api.set_voice_mode("normal"); await tick();
 check("...and Normal mode back", worklet().settings.whisper === false);
 await set("micStrictness", 5); await set("micGateAuto", false); await set("micThreshold", -38); await set("micNoiseFilter", false);
-check("Mic Setup's settings apply at once", JSON.stringify(worklet().settings) === JSON.stringify({ gate: "manual", strictness: 5, threshold: -38, whisper: false, filter: false }), JSON.stringify(worklet().settings));
+check("Mic Setup's settings apply at once", JSON.stringify(worklet().settings) === JSON.stringify({ gate: "manual", strictness: 5, threshold: -38, whisper: false, filter: false, delay: 100 }), JSON.stringify(worklet().settings));
 await set("micStrictness", 3); await set("micGateAuto", true); await set("micThreshold", -45); await set("micNoiseFilter", true);
 
 // --- turning it off and on while connected
@@ -431,6 +490,10 @@ check("turning it off puts the microphone back, on connections that are up too",
 check("...switched on, as the cleaned-up track was", mic().enabled === true);
 check("...Foundry's readings measure the microphone again", client.levelsStream.getAudioTracks()[0]?.original === mic());
 check("...and the cleanup is stopped", liveTrack.readyState === "ended" && FakeAudioContext.instances.at(-1).state === "closed" && status().state === "off");
+check("...and everyone is told it's off", announced().at(-1).active === false && api.has_mic_cleanup("p1") === false);
+const before_request = announced().length;
+receive({ action: "mic-cleanup-request", from: "p2" });
+check("...so nobody who loads later needs an answer", announced().length === before_request);
 await set("micCleanup", "default"); await tick();
 await worklet().emit({ type: "ready", version: "test", denoiser: true, error: null }); await tick();
 check("turning it back on swaps the cleaned-up track in again, without reconnecting", sentTrack()?.label === "destination" && firstPeer.sending()[0] === sentTrack());

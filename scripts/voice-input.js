@@ -21,7 +21,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const INPUT_SCRIPT_VERSION = "2.2.0";
+export const INPUT_SCRIPT_VERSION = "2.2.1";
 
 /** The version in the address keeps browsers from running a cached copy of an older worklet or filter */
 const WORKLET_URL = new URL("./voice-input-worklet.js?v=" + INPUT_SCRIPT_VERSION, import.meta.url).href;
@@ -98,6 +98,17 @@ export function register_voice_input_settings() {
     default: true,
     onChange: () => _settings_changed()
   });
+  game.settings.register(MODULE_ID, "micDelay", {
+    name: "proximity-voice-chat.Settings.MicDelay.Label",
+    hint: "proximity-voice-chat.Settings.MicDelay.Hint",
+    scope: "world",
+    config: true,
+    type: Number,
+    range: { min: 30, max: 150, step: 10 },
+    default: 100,
+    // every player's browser applies it at once, in the next pause in their speech
+    onChange: () => _send_settings()
+  });
   game.settings.register(MODULE_ID, "micCleanup", {
     name: "proximity-voice-chat.Settings.MicCleanup.Label",
     hint: "proximity-voice-chat.Settings.MicCleanup.Hint",
@@ -156,7 +167,8 @@ function _worklet_settings() {
     strictness: game.settings.get(MODULE_ID, "micStrictness"),
     threshold: game.settings.get(MODULE_ID, "micThreshold"),
     whisper,
-    filter: !!game.settings.get(MODULE_ID, "micNoiseFilter")
+    filter: !!game.settings.get(MODULE_ID, "micNoiseFilter"),
+    delay: game.settings.get(MODULE_ID, "micDelay")
   };
 }
 
@@ -572,7 +584,7 @@ export function input_gate_open() {
  * What the cleanup is doing in this browser, for Mic Setup and Voice Diagnostics
  * @returns {{state: "active" | "off" | "no-mic" | "starting" | "waiting" | "failed", reason: string | null,
  *   detail: string | null, filter: boolean | null, filterError: string | null, gate: string, strictness: number,
- *   threshold: number, whisper: boolean, filterWanted: boolean, choice: string, worldDefault: boolean,
+ *   threshold: number, whisper: boolean, filterWanted: boolean, delay: number, choice: string, worldDefault: boolean,
  *   worklet: string | null, openShare: number | null}}
  */
 export function voice_input_status() {
@@ -596,6 +608,7 @@ export function voice_input_status() {
     threshold: settings.threshold,
     whisper: settings.whisper,
     filterWanted: settings.filter,
+    delay: settings.delay,
     choice: game.settings.get(MODULE_ID, "micCleanup"),
     worldDefault: !!game.settings.get(MODULE_ID, "micCleanupDefault"),
     worklet: _path?.worklet_version ?? null,

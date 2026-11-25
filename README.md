@@ -109,8 +109,9 @@ Each player's microphone goes through a noise filter and a voice gate in their o
 - **The noise filter** is RNNoise, a small open-source filter trained on speech (the one Jitsi Meet uses). It removes what isn't a voice, and every 10 ms it says how sure it is that it's hearing one.
 - **The gate** sends sound only while you're speaking:
   - It opens on speech, not loudness. Breathing, birdsong, clicks and typing don't open it, even when they're as loud as your voice.
-  - It learns your room's background level while you're quiet, and your speaking level while you talk. Another voice in the room, or a TV, is too quiet to open it.
-  - It decides about 30 ms ahead of what it sends, so first syllables come out whole.
+  - It learns your room's background level while you're quiet, and your speaking level while you talk. Another voice in the room, or a TV, is too quiet to open it. A shout or a laugh barely moves your speaking level, so it doesn't make the gate stricter for what you say next.
+  - Short, loud, excited words ("Boo!", "Ha!") are over before the filter is sure they're speech, so a sound as loud as you usually speak needs much less certainty.
+  - It listens ahead of what it sends (100 ms by default; the GM sets it with **Microphone Cleanup Delay**). The quiet first sound of a sentence, like the "h" of "hello" or the "s" of "so", doesn't sound like speech to the filter until the vowel arrives. The look-ahead lets the gate open in time, and that first moment is sent unfiltered so the filter doesn't remove it.
   - It stays open through short pauses and fades out instead of cutting off, so word endings survive.
 - **Your voice mode:**
   - **Always Enabled** and **Voice Activation** now behave the same: the gate decides when you're heard. In Voice Activation it replaces Foundry's own detector.
@@ -123,8 +124,9 @@ Each player's microphone goes through a noise filter and a voice gate in their o
   - **Manual:** untick Automatic, and the slider becomes a loudness threshold drawn over a live meter.
   - **Hear yourself** plays your cleaned-up microphone back to you for 30 seconds, so you hear what everyone else hears.
 - **The GM sets the default** with **Microphone Cleanup for Players**. It's on unless the GM turns it off, and each player can still choose for themselves.
+- **The GM sets the delay** with **Microphone Cleanup Delay**, from 30 to 150 ms. Longer keeps more of the first sound of each sentence; shorter feels snappier. In testing, quiet first consonants came through whole at 100 ms, and about 9 dB quieter at 50 ms. A change reaches every player at once and takes effect in their next pause, so you can adjust it mid-session until it feels right. Push-to-talk never adds the look-ahead, since the key already decides.
 - **What it costs:**
-  - Your voice reaches others about 50 ms later, roughly one video frame.
+  - Your voice reaches others later by the Microphone Cleanup Delay: 100 ms by default, less than a typical phone call adds.
   - About 12% of one CPU core on each player's computer.
   - A 3.6 MB file each browser downloads once.
 - **It starts on your first click or key press after the page loads.** Browsers don't let a page process audio before that, so until then your microphone is sent as it is. Already-connected players get the cleaned-up voice straight away, without reconnecting.
@@ -133,13 +135,16 @@ Each player's microphone goes through a noise filter and a voice gate in their o
   - Speech came through unchanged.
   - Breathing, birdsong, clicks and typing were silenced in both browsers: at least 72 dB quieter in Chrome, and completely silent in Firefox.
   - The voice from across the room was blocked.
-  - A whisper lost about 25 dB in Normal mode and about 6 dB in Whisper mode.
+  - A whisper lost about 20 dB in Normal mode and about 6 dB in Whisper mode.
+  - A loud one-word shout after silence, and the next sentence after it, came through whole. In 2.2.0, one 300 ms shout raised the gate's bar by 15 dB; now it's under 2.
 - **Singing and instruments** may be treated as noise, since the filter is trained on speech. For a bard's song, untick **Remove background noise** or switch the cleanup off for a moment.
 
 ### Voice UI
 The camera dock is hidden by default. Everything it did lives in the players list instead.
 
-- **Speaking cues:** the players list highlights whoever is talking. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes. Each player can tune how loud counts as speaking.
+- **Speaking cues:** the players list highlights whoever is talking. Their tokens show a ring, a centre icon, or a corner badge in their player colour. Speaking is measured on the audio you actually receive, so it works in always-on, voice-activated, and push-to-talk modes.
+  - For someone whose [microphone cleanup](#microphone-cleanup) is on, the cue shows exactly while their voice is being sent: the gate sends true silence between words, so any sound arriving means they're being heard. No threshold to tune.
+  - For someone whose cleanup is off, each player can tune how loud counts as speaking.
   - **Out of earshot:** when someone talks through a token you can see but can't hear, the token gets a thin, faint ring (or, with the icon and badge styles, a speech bubble with dots), and their row in the players list is dimmed. You can see their lips moving, but the words don't reach you. Whispers get the same faint cue on the token, so you can catch someone whispering about you, but it doesn't say they're whispering, and a whisper you can't hear stays out of the players list.
   - **Several people at once:** when two or more people talk through the same token, such as the party token on a travel map, or the GM speaking through a player's token, the ring is checkered in all their colours. The badge is split into one slice per person. The cue takes the loudest of their voice modes.
 - **Join and leave alerts:** when someone joins or leaves voice chat, you hear a short chime (rising for joining, falling for leaving) on the same headphones as the voices, and a pop-up says who it was. That way nobody gets startled by a voice that suddenly appears. Each player chooses chime, pop-up, both, or neither, and how loud the chime is.
@@ -182,10 +187,11 @@ The camera dock is hidden by default. Everything it did lives in the players lis
 | Show Camera Dock Anyway | Client | Off | Brings the dock back on your device, e.g. to see video |
 | Speaking Cue on Tokens | World | Ring | The table's default cue: ring, icon, badge, or off |
 | My Speaking Cue on Tokens | Client | GM's default | Your own choice of cue |
-| Speaking Cue Threshold (dB) | Client | −45 | How loud a voice must be to show a cue; raise it if background noise lights people up |
+| Speaking Cue Threshold (dB) | Client | −45 | Only for players whose microphone cleanup is off: how loud a voice must be to show a cue; raise it if background noise lights them up |
 | Join and Leave Alerts | Client | Chime and pop-up | What you get when someone joins or leaves voice: chime and pop-up, chime only, pop-up only, or off |
 | Join and Leave Chime Volume | Client | 50 | How loud the chime is, in percent |
 | Microphone Cleanup for Players | World | On | Players' microphones go through the noise filter and voice gate unless they choose otherwise |
+| Microphone Cleanup Delay (ms) | World | 100 | How far ahead the voice gate listens: longer keeps the first sound of each sentence, shorter is snappier |
 | Microphone Cleanup | Client | GM's default | Your own choice: the GM's default, on, or off; the rest is in Mic Setup |
 | Fix Voice Connection Drops | World | On | The connection workaround above; everyone must reload after changing it |
 | Debug Logging | Client | Off | Logs every volume change, and why, to the browser console |
@@ -240,6 +246,7 @@ game.modules.get("proximity-voice-chat").api.diagnose()
 It prints one row per other user. Each row shows their current volume and why, whether your voice connection to them really finished, and whether it runs **direct** or **relayed**. It also shows the state of their audio. Above the table, it lists your relay server and the types of network address your browser offers.
 
 - **You can hear someone but they can't hear you** (or the other way round): the one who can't hear has probably hidden the other. Foundry then connects but plays none of their audio, and with the camera dock hidden that's invisible. Right-click the person in the players list and choose **Show User**, or use **Show Again** in Voice Diagnostics.
+- **The start of sentences gets clipped:** raise **Microphone Cleanup Delay**. If voices feel laggy, lower it.
 - **Someone's quiet words or word endings get lost:** in their Mic Setup, move **Strictness** towards Relaxed. If their voice sounds odd, they can untick **Remove background noise**. To rule the cleanup out entirely, set it to Off.
 - **Breathing or room noise still gets through for someone:** check that their cleanup is on in Voice Diagnostics. If it's waiting for a click, they should click anywhere on the page. If other voices in their room get through, they should move **Strictness** towards Strict.
 - **Everyone is too quiet:** raise **Voice Boost**. If one person is quiet, right-click them and raise their Voice Volume, up to 200%.
@@ -340,12 +347,15 @@ The upstream proof of concept (at the time of writing) was largely solid and wel
   - How: the module swaps the cleaned-up track into Foundry's own outgoing stream, and swaps it back whenever the cleanup can't run, so Foundry still owns the microphone, muting and device changes.
 - **In Voice Activation, the module's gate decides when you transmit**, instead of Foundry's detector.
   - Why: Foundry's detector measures the loudest single pitch over 50 ms, needs 3 of its last 10 readings above the threshold before it opens, and cuts off when all 10 are below.
+- **The look-ahead is a GM setting** ("Microphone Cleanup Delay"), not a fixed number.
+  - Why: how much delay a table will trade for whole first syllables is a matter of taste. In 2.2.0 it was fixed at 50 ms, which still clipped the quiet start of some sentences at my table.
 
 ### Interface
 - **The camera dock is hidden by default**, with speaking cues and a voice bar in the players list.
   - Why: for audio-only proximity play, the dock takes space and shows nothing useful. It's moved off-screen rather than removed, because voice audio plays through its video elements.
 - **Speaking is detected from the audio you receive**, with its own threshold setting.
   - Why: Foundry's own "speaking" signal stays on permanently in always-on voice mode. A separate threshold means tuning cues doesn't change when anyone transmits in voice-activated mode.
+  - For players whose microphone cleanup is on, there's no threshold: each browser says over the module's socket whether its microphone is cleaned up, and the cue shows whenever any sound arrives from them. It's still measured on the audio you receive, so a cue never shows for a voice that isn't reaching you.
 - **New hotkeys, right-click volume and audio blocking, and `diagnose()`** with a Debug Logging setting.
 - **Voice Diagnostics**: a window in place of the console, and GM-requested reports delivered as chat cards.
   - Why: asking players to open the browser console is unreliable, and the GM is the one who needs the data.
@@ -426,6 +436,7 @@ Available at `game.modules.get("proximity-voice-chat").api` for macros and other
 ### Microphone cleanup
 * `get_mic_status(): object`: what the cleanup is doing in this browser. `state` is `active`, `off`, `no-mic`, `starting`, `waiting` (for a click) or `failed`, with `reason` (`unsupported`, `worklet`, `rate`, `resume` or `error`) and `detail` when it failed. It also gives `filter` (whether the noise filter loaded), `gate` (`auto`, `manual` or `open` for push-to-talk), `strictness`, `threshold` and `whisper`.
 * `open_mic_setup(): Promise<Application | null>`: opens Mic Setup
+* `has_mic_cleanup(user_id: string): boolean`: whether that user's microphone goes through the cleanup, as their browser has said (for you, whether yours does)
 * Hook `proximityMicCleanupChanged(status: object)` fires in this browser when the cleanup starts, stops or fails, with the same object as `get_mic_status()`
 
 ## Development

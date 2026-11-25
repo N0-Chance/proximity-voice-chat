@@ -60,7 +60,7 @@
   "proximity-voice-chat.Settings.OwnersSpeak.Label": "Owners Speak Through Their Tokens",
   "proximity-voice-chat.Settings.OwnersSpeak.Hint": "Players speak through tokens of their assigned character, and of actors they've been given Owner permission on, without being added to the token's speaker list. Default \"all players\" ownership doesn't count.",
   "proximity-voice-chat.Settings.SpeakingThreshold.Label": "Speaking Cue Threshold (dB)",
-  "proximity-voice-chat.Settings.SpeakingThreshold.Hint": "How loud someone's voice must be, as you receive it, to show a speaking cue. Lower is more sensitive; raise it if background noise lights people up. Doesn't affect when anyone transmits.",
+  "proximity-voice-chat.Settings.SpeakingThreshold.Hint": "Only for players whose microphone cleanup is off: how loud their voice must be, as you receive it, to show a speaking cue. Lower is more sensitive; raise it if background noise lights them up. For players with the cleanup on, the cue shows exactly while their voice is being sent. Doesn't affect when anyone transmits.",
   "proximity-voice-chat.Token.ListenList.Label": "Who also listens through this token",
   "proximity-voice-chat.UI.GlobalListenOn": "Turn On Global Listening",
   "proximity-voice-chat.UI.GlobalListenOff": "Turn Off Global Listening",
@@ -292,5 +292,8 @@
   "proximity-voice-chat.Diagnostics.Cleanup.Manual": "fixed threshold {threshold} dB",
   "proximity-voice-chat.Diagnostics.Cleanup.Auto": "automatic (strictness {strictness})",
   "proximity-voice-chat.Diagnostics.Cleanup.Whisper": "whispering",
-  "proximity-voice-chat.Diagnostics.Cleanup.OpenShare": "sending {percent}% of the time"
+  "proximity-voice-chat.Diagnostics.Cleanup.OpenShare": "sending {percent}% of the time",
+  "proximity-voice-chat.Settings.MicDelay.Label": "Microphone Cleanup Delay (ms)",
+  "proximity-voice-chat.Settings.MicDelay.Hint": "How far ahead the voice gate listens before sending each player's voice: the total delay the cleanup adds. Longer keeps the quiet first sound of a sentence (the \"h\" of \"hello\", the \"s\" of \"so\"); shorter feels snappier. 100 keeps almost all of them; 50 loses some. Changes reach every player at once and take effect in their next pause.",
+  "proximity-voice-chat.Diagnostics.Cleanup.Delay": "{delay} ms delay"
 }

@@ -8,7 +8,7 @@
 const MODULE_ID = "proximity-voice-chat";
 
 /** Kept in step with module.json by tools/release.sh, checked against SCRIPT_VERSION to catch stale caches */
-export const UI_SCRIPT_VERSION = "2.2.0";
+export const UI_SCRIPT_VERSION = "2.2.1";
 
 export const SPEAKING_STYLES = {
   ring: "proximity-voice-chat.Settings.SpeakingIndicator.Ring",
@@ -19,6 +19,14 @@ export const SPEAKING_STYLES = {
 
 /** How long someone counts as still speaking after their audio drops below the threshold */
 const SPEAKING_HOLD_MS = 400;
+/**
+ * For someone whose microphone goes through the cleanup: their gate sends true silence between words, which arrives
+ * reading -135 dB or lower in Chrome and -200 dB in Firefox, while anything actually sent reads above -90 dB (a
+ * microphone sent as it is reads -90 to -70 dB in a quiet room). So any sound at all means they're being sent, and
+ * the gate's own hold and fade-out cover the gaps between words.
+ */
+const SENT_SOUND_DB = -100;
+const SENT_SOUND_HOLD_MS = 150;
 const LEVEL_REPORT_INTERVAL_MS = 100;
 /** Font Awesome ships with Foundry (v14: Font Awesome 7 Pro); canvas cues draw its glyphs as text */
 const ICON_FONT = ["Font Awesome 7 Pro", "Font Awesome 6 Pro", "Font Awesome 7 Free", "Font Awesome 6 Free"];
@@ -166,11 +174,14 @@ function _get_stream(user_id) {
 function _on_level(user_id, db_level) {
   const state = _speakers.get(user_id);
   if (!state) return;
-  // separate from Foundry's voice-activation threshold, so tuning cues doesn't change when anyone transmits
-  const threshold = game.settings.get(MODULE_ID, "speakingThreshold");
+  // a cleaned-up microphone's cue follows its gate: it shows while sound is actually sent. Anyone else's goes by the
+  // threshold setting, separate from Foundry's voice-activation threshold, so tuning cues doesn't change when
+  // anyone transmits.
+  const gated = !!api().has_mic_cleanup?.(user_id);
+  const threshold = gated ? SENT_SOUND_DB : game.settings.get(MODULE_ID, "speakingThreshold");
   const now = Date.now();
   if (db_level >= threshold) state.last_loud = now;
-  let speaking = now - state.last_loud < SPEAKING_HOLD_MS;
+  let speaking = now - state.last_loud < (gated ? SENT_SOUND_HOLD_MS : SPEAKING_HOLD_MS);
   // your own mic only counts while it is actually transmitting (push-to-talk held, not muted)
   if (user_id === game.user.id) speaking &&= !!game.webrtc.broadcasting && !game.webrtc.settings.getUser(user_id)?.muted;
   _set_speaking(user_id, speaking);

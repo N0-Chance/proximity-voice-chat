@@ -339,6 +339,24 @@ check("raised to -30 dB: -25 dB still counts", row("p2").classList.contains("pvc
 now += 1000; await speak("p2", -80);
 settings.speakingThreshold = -45; rtc.client.voice.activityThreshold = -45;
 
+// someone whose microphone cleanup is on: their cue follows what's actually sent, not the threshold
+check("a browser that has just loaded asks whose microphone is cleaned up", emitted.some(m => m.action === "mic-cleanup-request"));
+receive({ action: "mic-cleanup", from: "p2", active: true });
+await speak("p2", -95);
+check("Bob's microphone is cleaned up: any sound arriving from him shows his cue, below the threshold too", row("p2").classList.contains("pvc-speaking"));
+now += 100; await speak("p2", -140);
+check("...it stays through the gap between two level readings", row("p2").classList.contains("pvc-speaking"));
+now += 100; await speak("p2", -140);
+check("...and the silence his gate sends clears it within a fifth of a second", !row("p2").classList.contains("pvc-speaking"));
+receive({ action: "mic-cleanup", from: "p2", active: false });
+now += 1000; await speak("p2", -95);
+check("his cleanup off again: the threshold applies again", !row("p2").classList.contains("pvc-speaking"));
+receive({ action: "mic-cleanup", from: "p2", active: true });
+Hooks.callAll("userConnected", game.users.get("p2"), false); Hooks.callAll("userConnected", game.users.get("p2"), true);
+now += 1000; await speak("p2", -95);
+check("someone who leaves is forgotten until their browser says so again", !row("p2").classList.contains("pvc-speaking"));
+now += 1000; await speak("p2", -140);
+
 // own voice only counts while transmitting
 await speak("p1", -20);
 check("your own voice shows on your token while transmitting", indicatorOn(tokens[0])?.pvcStyle === "ring");
