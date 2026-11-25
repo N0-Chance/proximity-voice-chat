@@ -232,7 +232,8 @@ let _pulse_ticker = null;
 /**
  * Which tokens should currently show a speaking cue, and for whom. Heard: people this client can hear, and your own
  * voice. Unheard: people speaking through a token in earshot of nobody you speak for, shown faintly ("lips moving").
- * A whisper you can't hear stays private and isn't listed at all. Users are in game.users order, so the colours on a
+ * Whispers count too: seeing someone whisper on a token in view is part of the game, and the faint cue looks the same
+ * as any other speech out of earshot. Users are in game.users order, so the colours on a
  * shared token keep their places.
  * @returns {Map<string, {heard: Array<foundry.documents.User>, unheard: Array<foundry.documents.User>}>} by token UUID
  */
@@ -241,7 +242,6 @@ function _speaking_tokens() {
   for (const user of game.users) {
     if (!is_speaking(user.id)) continue;
     const heard = user.isSelf || api().get_user_volume(user.id) > 0;
-    if (!heard && api().get_voice_mode(user) === "whisper") continue;
     for (const uuid of api().get_speaking_token_uuids(user)) {
       if (!tokens.has(uuid)) tokens.set(uuid, { heard: [], unheard: [] });
       tokens.get(uuid)[heard ? "heard" : "unheard"].push(user);
@@ -609,7 +609,8 @@ function _update_player_row(user_id) {
   const audible = !user || user.isSelf || api().get_user_volume(user_id) > 0;
   // out of earshot: the same "lips moving" bubble as on the token
   icon.className = "pvc-speaking-icon " + (audible ? (MODE_LOOKS[mode] ?? MODE_LOOKS.normal).list : UNHEARD_LOOK.icon);
-  // a whisper you can't hear stays private: no cue at all. Other speech out of earshot shows dimmed.
+  // a whisper you can't hear stays out of the players list, which shows it wherever the token is; its token still
+  // gets the faint cue, which only shows when you can see the token. Other speech out of earshot shows dimmed here.
   const speaking = is_speaking(user_id) && (audible || mode !== "whisper");
   row.classList.toggle("pvc-speaking", speaking);
   row.classList.toggle("pvc-inaudible", speaking && !audible);
