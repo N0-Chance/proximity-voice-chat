@@ -88,6 +88,14 @@ class Text extends Container {
 }
 globalThis.PIXI = { Container, Graphics, Sprite, Text };
 
+// --- a fake <audio> element for the join and leave chimes: records what it was asked to play, and where
+const chimes = [];
+globalThis.Audio = class {
+  constructor(src) { this.src = src; this.volume = 1; this.sinkId = ""; }
+  async setSinkId(id) { this.sinkId = id; }
+  async play() { chimes.push(this); }
+};
+
 // --- a browser with Web Audio, already clicked in; the voice path itself is covered by test/audio.mjs
 const { FakeAudioContext } = await import("./fake-audio.mjs");
 FakeAudioContext.startState = "running";
@@ -254,6 +262,10 @@ Hooks.callAll("ready");
 await tick();
 renderPlayers();
 await runIntervals();
+
+// --- join and leave alerts: nobody already in voice is announced when you load
+const alertNotices = () => notices.filter(n => /JoinedVoice|LeftVoice/.test(n));
+check("loading the page doesn't announce the people already in voice", alertNotices().length === 0 && chimes.length === 0, JSON.stringify(alertNotices()));
 
 // --- dock
 check("dock hidden by default (world setting on)", bodyClasses.classList.contains("pvc-hide-dock"));
@@ -470,6 +482,73 @@ check("when they stop, the shared cue goes", !indicatorOn(tokens[1]));
 settings.whisperRange = 25;
 receive({ action: "voice-mode", from: "p2", mode: "normal" }); receive({ action: "voice-mode", from: "gm", mode: "normal" });
 deliverUserUpdate(users[0], { selected_tokens: [] }, "gm"); await runIntervals();
+
+// --- join and leave alerts, once the first seconds after loading are over
+{
+  now += 20000;
+  const bobStream = streams.p2;
+  const reset = () => { notices.length = 0; chimes.length = 0; };
+  const { chime_wav } = await import(new URL("./voice-ui.js", mainScript.startsWith("file:") ? mainScript : "file://" + mainScript).href);
+  await runIntervals(); reset();
+  // a replaced connection: Bob's audio drops for a few seconds and comes back
+  delete streams.p2; await runIntervals();
+  now += 5000; await runIntervals();
+  streams.p2 = { ...bobStream, id: "s2r" }; await runIntervals();
+  check("a voice that drops for a few seconds and comes back isn't announced", alertNotices().length === 0 && chimes.length === 0, JSON.stringify(alertNotices()));
+  // his audio goes for good while he stays in Foundry
+  delete streams.p2; await runIntervals();
+  now += 10000; await runIntervals();
+  check("...nor is one that's been gone for less than 15 seconds", alertNotices().length === 0);
+  now += 6000; await runIntervals();
+  check("gone for 15 seconds: 'Bob left voice' and a chime", alertNotices().length === 1 && alertNotices()[0].includes("LeftVoice") && alertNotices()[0].includes("Bob") && chimes.length === 1);
+  const leaveSrc = chimes[0]?.src;
+  reset();
+  streams.p2 = { ...bobStream, id: "s2j" }; await runIntervals();
+  check("Bob comes back: 'Bob joined voice' and a chime", alertNotices().length === 1 && alertNotices()[0].includes("JoinedVoice") && chimes.length === 1, JSON.stringify(alertNotices()));
+  check("the join chime is a different sound from the leave chime", !!chimes[0]?.src && chimes[0].src !== leaveSrc);
+  check("the chime plays at the default 50% volume", chimes[0]?.volume === 0.5);
+  reset();
+  // closing Foundry is announced at once
+  users[2].active = false; Hooks.callAll("userConnected", users[2], false); await runIntervals();
+  check("Bob closes Foundry: announced straight away", alertNotices().length === 1 && alertNotices()[0].includes("LeftVoice") && chimes.length === 1);
+  now += 20000; await runIntervals();
+  check("...and only once", alertNotices().length === 1 && chimes.length === 1);
+  users[2].active = true; Hooks.callAll("userConnected", users[2], true); await runIntervals();
+  check("Bob reconnects: announced as joining", alertNotices().length === 2 && alertNotices()[1].includes("JoinedVoice"));
+  // the choices, the output device, the volume, and deafen
+  const bobLeavesAndReturns = async () => {
+    reset();
+    users[2].active = false; Hooks.callAll("userConnected", users[2], false); await runIntervals();
+    users[2].active = true; Hooks.callAll("userConnected", users[2], true); await runIntervals();
+  };
+  rtc.client.audioSink = "headphones-id"; settings.voiceAlertVolume = 80;
+  await bobLeavesAndReturns();
+  check("the chime goes to the output device chosen for voices, at the chosen volume", chimes.length === 2 && chimes.every(c => c.sinkId === "headphones-id" && c.volume === 0.8));
+  rtc.client.audioSink = "default"; settings.voiceAlertVolume = 50;
+  await bobLeavesAndReturns();
+  check("Foundry's 'default' device is passed as the browser default", chimes.length === 2 && chimes.every(c => c.sinkId === ""));
+  settings.voiceAlerts = "chime"; await bobLeavesAndReturns();
+  check("'Chime only': chimes, no pop-ups", chimes.length === 2 && alertNotices().length === 0);
+  settings.voiceAlerts = "popup"; await bobLeavesAndReturns();
+  check("'Pop-up only': pop-ups, no chimes", chimes.length === 0 && alertNotices().length === 2);
+  settings.voiceAlerts = "none"; await bobLeavesAndReturns();
+  check("'Off': nothing", chimes.length === 0 && alertNotices().length === 0);
+  settings.voiceAlerts = "all"; rtc.client.muteAll = true; await bobLeavesAndReturns();
+  check("deafened: the pop-ups still show, but no chime", chimes.length === 0 && alertNotices().length === 2);
+  rtc.client.muteAll = false; settings.voiceAlertVolume = 0; await bobLeavesAndReturns();
+  check("chime volume 0: no chime", chimes.length === 0 && alertNotices().length === 2);
+  settings.voiceAlertVolume = 50;
+  // the chime itself
+  const wav = chime_wav?.([660, 880]) ?? new Uint8Array(44);// before 2.1 there was no chime
+  const ascii = (at, n) => String.fromCharCode(...wav.slice(at, at + n));
+  const view = new DataView(wav.buffer);
+  const pcm = Array.from({ length: (wav.length - 44) / 2 }, (_, i) => view.getInt16(44 + i * 2, true));
+  check("the chime is a valid mono 16-bit WAV", ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE" && ascii(36, 4) === "data"
+    && view.getUint32(4, true) === wav.length - 8 && view.getUint32(40, true) === wav.length - 44 && view.getUint16(22, true) === 1 && view.getUint16(34, true) === 16);
+  check("...about a third of a second long, audible, never clipping, and fading to silence", Math.abs(pcm.length / 24000 - 0.31) < 0.02
+    && Math.max(...pcm.map(Math.abs)) > 8000 && Math.max(...pcm.map(Math.abs)) < 32767 && Math.max(...pcm.slice(-50).map(Math.abs)) < 50);
+  reset();
+}
 
 // someone joining asks for the current modes; only non-Normal modes answer
 api.set_voice_mode("whisper"); await tick();

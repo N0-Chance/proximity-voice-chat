@@ -91,6 +91,29 @@ export function register_voice_ui_settings() {
     choices: { default: "proximity-voice-chat.Settings.SpeakingIndicator.Default", ...SPEAKING_STYLES },
     onChange: () => _redraw_all_indicators()
   });
+  game.settings.register(MODULE_ID, "voiceAlerts", {
+    name: "proximity-voice-chat.Settings.VoiceAlerts.Label",
+    hint: "proximity-voice-chat.Settings.VoiceAlerts.Hint",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "all",
+    choices: {
+      all: "proximity-voice-chat.Settings.VoiceAlerts.All",
+      chime: "proximity-voice-chat.Settings.VoiceAlerts.Chime",
+      popup: "proximity-voice-chat.Settings.VoiceAlerts.Popup",
+      none: "proximity-voice-chat.Settings.VoiceAlerts.None"
+    }
+  });
+  game.settings.register(MODULE_ID, "voiceAlertVolume", {
+    name: "proximity-voice-chat.Settings.VoiceAlertVolume.Label",
+    hint: "proximity-voice-chat.Settings.VoiceAlertVolume.Hint",
+    scope: "client",
+    config: true,
+    type: Number,
+    range: { min: 0, max: 100, step: 5 },
+    default: 50
+  });
 }
 
 function _speaking_style() {
@@ -837,6 +860,146 @@ function _add_token_user_choices(application, element) {
 }
 
 /* -------------------------------------------- */
+/*  Join and leave alerts                       */
+/* -------------------------------------------- */
+
+/** How long someone can drop out of voice and come back without it counting as leaving: connections get replaced */
+const REJOIN_GRACE_MS = 15000;
+/** For this long after you load, everyone already in voice counts as having been there, so loading doesn't chime */
+const STARTUP_QUIET_MS = 15000;
+/** Two short notes each: up for someone joining, down for someone leaving (Hz) */
+const CHIMES = { join: [660, 880], leave: [880, 587] };
+
+/** When this client's voice UI started, or null before ready */
+let _ready_at = null;
+/**
+ * Per other user: whether they're in voice, since when, and whether that change has been dealt with (announced, or
+ * not worth announcing). A drop that isn't dealt with yet may still turn out to be a reconnect.
+ * @type {Map<string, {in: boolean, since: number, settled: boolean}>}
+ */
+const _presence = new Map();
+/** @type {Record<string, string>} object URLs of the chimes, made once */
+const _chime_urls = {};
+
+/**
+ * Whether someone is in voice as far as you're concerned: you're receiving their audio. Someone without a
+ * microphone sends none, so they never count, but you couldn't hear them anyway.
+ * @param {foundry.documents.User} user
+ * @returns {boolean}
+ */
+function _in_voice(user) {
+  if (!user.active || user.isSelf) return false;
+  return !!_get_stream(user.id)?.getAudioTracks().some(track => track.readyState !== "ended");
+}
+
+/**
+ * Notices people joining and leaving voice, on the voice UI's one-second tick
+ */
+function _update_presence() {
+  if (_ready_at === null || !_is_voice_active()) return;
+  const now = Date.now();
+  const quiet = now - _ready_at < STARTUP_QUIET_MS;
+  for (const user of game.users) {
+    if (user.isSelf) continue;
+    const present = _in_voice(user);
+    const state = _presence.get(user.id);
+    if (!state) {
+      _presence.set(user.id, { in: present, since: now, settled: true });
+      if (present && !quiet) _announce(user, true);
+    } else if (present && !state.in) {
+      // back within the grace period, before their leaving was announced: only the connection was replaced
+      const reconnect = !state.settled;
+      _presence.set(user.id, { in: true, since: now, settled: true });
+      if (!reconnect && !quiet) _announce(user, true);
+    } else if (!present && state.in) {
+      _presence.set(user.id, { in: false, since: now, settled: false });
+    } else if (!present && !state.settled && now - state.since >= REJOIN_GRACE_MS) {
+      state.settled = true;
+      _announce(user, false);
+    }
+  }
+}
+
+/**
+ * Someone closing Foundry has left for sure, so that's announced straight away rather than after the grace period
+ * @param {foundry.documents.User} user
+ */
+function _on_user_disconnected(user) {
+  const state = _presence.get(user.id);
+  if (!state || (!state.in && state.settled)) return;
+  _presence.set(user.id, { in: false, since: Date.now(), settled: true });
+  _announce(user, false);
+}
+
+/**
+ * A chime and/or a pop-up, as each player chooses. No chime while you've deafened yourself.
+ * @param {foundry.documents.User} user
+ * @param {boolean} joined
+ */
+function _announce(user, joined) {
+  const choice = game.settings.get(MODULE_ID, "voiceAlerts");
+  if (choice === "none" || !_is_voice_active()) return;
+  if (choice !== "popup" && !game.webrtc?.settings?.client?.muteAll) _play_chime(joined ? "join" : "leave");
+  if (choice !== "chime") {
+    ui.notifications.info(game.i18n.format("proximity-voice-chat.UI." + (joined ? "JoinedVoice" : "LeftVoice"), { name: user.name }));
+  }
+}
+
+/**
+ * Plays a chime on the output device chosen for voices, so it comes out of the same headphones
+ * @param {"join" | "leave"} kind
+ */
+function _play_chime(kind) {
+  const volume = Math.min(1, Math.max(0, (game.settings.get(MODULE_ID, "voiceAlertVolume") ?? 50) / 100));
+  if (!(volume > 0) || typeof Audio !== "function") return;
+  try {
+    _chime_urls[kind] ??= URL.createObjectURL(new Blob([chime_wav(CHIMES[kind])], { type: "audio/wav" }));
+    const audio = new Audio(_chime_urls[kind]);
+    audio.volume = volume;
+    // Foundry calls the browser's default "default", which Firefox's setSinkId rejects
+    const sink = game.webrtc?.settings?.client?.audioSink;
+    const wanted = !sink || sink === "default" ? "" : sink;
+    const routed = wanted && typeof audio.setSinkId === "function" ? audio.setSinkId(wanted).catch(() => {}) : Promise.resolve();
+    // the browser refuses to play anything before the first click on the page; then there's just no chime
+    routed.then(() => audio.play()).catch(() => {});
+  } catch (err) {
+    console.warn(MODULE_ID + " | could not play the voice chime", err);
+  }
+}
+
+/**
+ * Synthesises a chime as a mono 16-bit WAV file: one soft, bell-like note per frequency, one after the other.
+ * Made in code, so the module ships no sound files.
+ * @param {Array<number>} frequencies in Hz
+ * @param {number} [sample_rate]
+ * @returns {Uint8Array}
+ */
+export function chime_wav(frequencies, sample_rate = 24000) {
+  const step = Math.round(0.09 * sample_rate);// each note starts this long after the last
+  const ring = Math.round(0.22 * sample_rate);// and rings for this long
+  const length = step * (frequencies.length - 1) + ring;
+  const samples = new Float32Array(length);
+  frequencies.forEach((frequency, n) => {
+    for (let i = 0; i < ring; i++) {
+      const t = i / sample_rate;
+      // a quick fade in, so it doesn't click, then a smooth decay to silence by the end
+      const envelope = Math.min(1, t / 0.005) * Math.exp(-t / 0.05) * (1 - i / ring);
+      const tone = Math.sin(2 * Math.PI * frequency * t) + 0.25 * Math.sin(4 * Math.PI * frequency * t);
+      samples[n * step + i] += 0.4 * envelope * tone;
+    }
+  });
+  const bytes = new Uint8Array(44 + length * 2);
+  const view = new DataView(bytes.buffer);
+  const text = (offset, value) => [...value].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + length * 2, true); text(8, "WAVE");
+  text(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sample_rate, true); view.setUint32(28, sample_rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, length * 2, true);
+  for (let i = 0; i < length; i++) view.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767), true);
+  return bytes;
+}
+
+/* -------------------------------------------- */
 /*  Hooks                                       */
 /* -------------------------------------------- */
 
@@ -844,6 +1007,7 @@ Hooks.on("renderTokenConfig", _add_token_user_choices);
 Hooks.on("renderPrototypeTokenConfig", _add_token_user_choices);
 
 Hooks.once("ready", async () => {
+  _ready_at = Date.now();
   _apply_dock_visibility();
   // canvas text only renders the icon font once the browser has loaded it
   try {
@@ -854,6 +1018,7 @@ Hooks.once("ready", async () => {
   _reconcile_speakers();
   setInterval(() => {
     _reconcile_speakers();
+    _update_presence();
     _refresh_token_indicators();
     for (const user_id of _speakers.keys()) _update_player_row(user_id);
     _refresh_voice_bar();// picks up hotkeys rebound in Configure Controls
@@ -922,7 +1087,10 @@ Hooks.on("updateUser", (user, changed) => {
   _update_global_markers();
 });
 
-Hooks.on("userConnected", () => _reconcile_speakers());
+Hooks.on("userConnected", (user, connected) => {
+  if (!connected && user) _on_user_disconnected(user);
+  _reconcile_speakers();
+});
 
 // the token redraws (e.g. after an image change) destroy its children, so re-attach the cue
 Hooks.on("drawToken", () => _refresh_token_indicators());
