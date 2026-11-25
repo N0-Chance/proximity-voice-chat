@@ -38,7 +38,7 @@ node test/audio.mjs | tail -1
 git add -A
 git commit -m "$version: $summary
 
-Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git tag -a "v$version" -m "v$version"
 
 export GIT_TERMINAL_PROMPT=0
