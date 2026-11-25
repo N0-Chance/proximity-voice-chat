@@ -1861,6 +1861,13 @@ function _patch_simplepeer() {
     // answers and candidates only belong to a connection we still have; without one they're leftovers from a
     // dropped connection, and Foundry would otherwise build a new answering connection around them
     if (!existing && data?.type !== "offer") return;
+    // an answer only fits a connection that has sent an offer and is waiting for one. Any other is a leftover, e.g.
+    // a second reply to a request we've already had answered, and SimplePeer tears down the connection on it
+    // ("Cannot set remote answer in state stable")
+    if (data?.type === "answer" && existing?._pc && existing._pc.signalingState !== "have-local-offer") {
+      if (game.settings.get(MODULE_ID, "debug")) console.log(MODULE_ID + " | ignored a leftover answer from " + game.users.get(userId)?.name);
+      return;
+    }
     if (existing && fingerprint && existing[_PEER_REMOTE_FINGERPRINT] && existing[_PEER_REMOTE_FINGERPRINT] !== fingerprint) {
       // the other side has started over, e.g. after reloading; answer with a fresh connection
       if (game.settings.get(MODULE_ID, "debug")) console.log(MODULE_ID + " | " + game.users.get(userId)?.name + " started a new connection");

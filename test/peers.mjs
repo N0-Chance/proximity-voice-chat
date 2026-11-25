@@ -19,7 +19,8 @@ class FakePeer extends EventEmitter {
     this.fp = "fp" + (++seq);
     this.destroyed = false;
     this._connected = false;
-    this._pc = { connectionState: "new", iceConnectionState: "new" };
+    // like RTCPeerConnection: "have-local-offer" between sending an offer and getting its answer, otherwise "stable"
+    this._pc = { connectionState: "new", iceConnectionState: "new", signalingState: "stable" };
     this.remoteFp = null;
     this.negotiatedAt = null;
     this.partnerLostAt = null;
@@ -29,6 +30,7 @@ class FakePeer extends EventEmitter {
   start() {
     if (this.initiator && !this.destroyed && !this.started) {
       this.started = true;
+      this._pc.signalingState = "have-local-offer";
       this.emit("signal", { type: "offer", sdp: "v=0\na=fingerprint:sha-256 " + this.fp + "\n" });
     }
   }
@@ -43,8 +45,10 @@ class FakePeer extends EventEmitter {
       this.emit("signal", { type: "answer", sdp: "a=fingerprint:sha-256 " + this.fp + "\n" });
       this.emit("signal", { candidate: { candidate: "host " + this.fp } });
     } else if (data.type === "answer") {
-      if (!this.initiator || this.remoteFp) return this.fail("Called in wrong state: have-remote-offer");
+      // what Chrome and Firefox both refuse, and SimplePeer destroys the connection over
+      if (this._pc.signalingState !== "have-local-offer") return this.fail("Cannot set remote answer in state stable");
       this.remoteFp = fp;
+      this._pc.signalingState = "stable";
       this.negotiatedAt = now;
     } else if (data.candidate) {
       if (!this.remoteFp) return;// queued until the offer arrives
@@ -80,6 +84,7 @@ class FakePeer extends EventEmitter {
 
 // --- Foundry 14.369 SimplePeerAVClient peer management, minus media setup
 let queue = [];
+let lastAnswer = null;
 class SimplePeerAVClient {
   constructor(id) {
     this.id = id;
@@ -163,6 +168,7 @@ function deliver(clients) {
   for (let guard = 0; (queue.length || moduleQueue.length) && guard < 1000; guard++) {
     if (queue.length) {
       const { from, to, data } = queue.shift();
+      if (data.type === "answer") lastAnswer = { from, to, data };
       as(clients[to], () => clients[to].receiveSignal(from, data));
     } else {
       // module socket messages go to every other client
@@ -175,12 +181,15 @@ function deliver(clients) {
 /**
  * @returns {{connectedAt: number | null, stable: boolean, errors: string[]}}
  */
-async function simulate({ connect_ms, duration_ms = 180000, offsets = { a: 0, b: 0 }, reload = null }) {
+async function simulate({ connect_ms, duration_ms = 180000, offsets = { a: 0, b: 0 }, reload = null, repeat_answer_at = null }) {
   now = 0; errors = []; all_peers = []; queue = []; moduleQueue = [];
   const clients = { a: new SimplePeerAVClient("a"), b: new SimplePeerAVClient("b") };
   let connectedAt = null;
   let reconnectedAt = null;
+  lastAnswer = null;
   for (now = 0; now <= duration_ms; now += 500) {
+    // a reply turns up a second time, e.g. queued while a page was loading
+    if (repeat_answer_at !== null && now === repeat_answer_at && lastAnswer) queue.push(lastAnswer);
     if (reload && now === reload.at) {
       // a reload destroys every connection without telling the other side, then starts a fresh client
       for (const peer of clients[reload.who].peers.values()) { peer.removeAllListeners(); peer.destroyed = true; }
@@ -216,6 +225,7 @@ const scenarios = [
   { name: "slow network (12s setup), polls 3s apart", connect_ms: 12000, offsets: { a: 0, b: 3000 } },
   { name: "caller reloads after connecting", connect_ms: 2000, offsets: { a: 0, b: 3000 }, reload: { who: "a", at: 60000 } },
   { name: "answerer reloads after connecting", connect_ms: 2000, offsets: { a: 0, b: 3000 }, reload: { who: "b", at: 60000 } },
+  { name: "a leftover answer arrives after connecting", connect_ms: 2000, offsets: { a: 0, b: 3000 }, repeat_answer_at: 60000 },
 ];
 
 // --- Foundry 14.369 voice detection (AVMaster) and SimplePeerAVClient's mute handling, as far as muting goes.
